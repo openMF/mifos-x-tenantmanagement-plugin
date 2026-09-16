@@ -2,12 +2,12 @@
 
 ## Supported Versions
 
-We use this section to tell people about which versions of your project are currently being supported with security updates.
+Security fixes are made on `dev` and released from `main`. Only the latest release is supported.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| main    | :white_check_mark: |
-| < x.x   | :x:                 |
+| Version                    | Supported          |
+| -------------------------- | ------------------ |
+| `main` (latest release)    | :white_check_mark: |
+| Earlier releases           | :x:                |
 
 ## Reporting a Vulnerability
 
