@@ -91,10 +91,11 @@ The following branch names and tags (and their derivatives/extensions) are reser
 
 | Requirement | Version |
 |---|---|
-| Java (JDK) | **21** |
+| Java (JDK) | **25** |
 | Maven | 3.9+ (or use the included `./mvnw` wrapper) |
 | Docker | Required for integration tests ([Testcontainers](https://testcontainers.com/)) |
-| Apache Fineract | **1.15.0-SNAPSHOT** (`develop` branch) |
+| Spring Boot | **4.1** |
+| Apache Fineract | **1.16.0-SNAPSHOT** (`develop` branch) |
 
 ### Build and Test
 

@@ -10,35 +10,27 @@
   <parent>
     <groupId>org.springframework.boot</groupId>
     <artifactId>spring-boot-starter-parent</artifactId>
-    <version>3.5.13</version>
+    <version>4.1.1</version>
     <relativePath/>
   </parent>
   <groupId>community.mifos</groupId>
   <artifactId>tenantmanagement-plugin</artifactId>
-  <version>1.15.0-SNAPSHOT</version>
+  <version>1.16.0-SNAPSHOT</version>
   <name>tenantmanagement-plugin</name>
   <description>Mifos X Tenant Management Plugin for Apache Fineract</description>
 
+  <!--
+    Lombok, Mockito, Testcontainers, the PostgreSQL driver and the Surefire/Failsafe plugins take
+    their versions from Spring Boot's dependency management.
+  -->
   <properties>
-    <java.version>21</java.version>
-    <fineract.version>1.15.0-SNAPSHOT</fineract.version>
-    <lombok.version>1.18.44</lombok.version>
-    <spotless.version>3.4.0</spotless.version>
-    <testcontainers.version>1.21.4</testcontainers.version>
-    <mockito.version>5.17.0</mockito.version>
+    <java.version>25</java.version>
+    <maven.compiler.release>25</maven.compiler.release>
+    <fineract.version>0.0.1556-391c415</fineract.version>
+    <spotless.version>3.10.2</spotless.version>
+    <!-- REST Assured is no longer managed by Spring Boot 4. -->
+    <rest-assured.version>6.0.1</rest-assured.version>
   </properties>
-
-  <dependencyManagement>
-    <dependencies>
-      <dependency>
-        <groupId>org.testcontainers</groupId>
-        <artifactId>testcontainers-bom</artifactId>
-        <version>${testcontainers.version}</version>
-        <type>pom</type>
-        <scope>import</scope>
-      </dependency>
-    </dependencies>
-  </dependencyManagement>
 
   <dependencies>
     <!--
@@ -52,13 +44,6 @@
       <artifactId>fineract-core</artifactId>
       <version>${fineract.version}</version>
       <scope>provided</scope>
-      <exclusions>
-        <!-- The published snapshot poms name sibling modules at an unpublished 1.15.0. -->
-        <exclusion>
-          <groupId>org.apache.fineract</groupId>
-          <artifactId>*</artifactId>
-        </exclusion>
-      </exclusions>
     </dependency>
     <dependency>
       <groupId>org.apache.fineract</groupId>
@@ -66,13 +51,6 @@
       <version>${fineract.version}</version>
       <classifier>plain</classifier>
       <scope>provided</scope>
-      <exclusions>
-        <!-- The published snapshot poms name sibling modules at an unpublished 1.15.0. -->
-        <exclusion>
-          <groupId>org.apache.fineract</groupId>
-          <artifactId>*</artifactId>
-        </exclusion>
-      </exclusions>
     </dependency>
     <dependency>
       <groupId>org.projectlombok</groupId>
@@ -101,14 +79,15 @@
       <artifactId>testcontainers</artifactId>
       <scope>test</scope>
     </dependency>
+    <!-- Testcontainers 2.x artifact names -->
     <dependency>
       <groupId>org.testcontainers</groupId>
-      <artifactId>junit-jupiter</artifactId>
+      <artifactId>testcontainers-junit-jupiter</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.testcontainers</groupId>
-      <artifactId>postgresql</artifactId>
+      <artifactId>testcontainers-postgresql</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>
@@ -119,6 +98,7 @@
     <dependency>
       <groupId>io.rest-assured</groupId>
       <artifactId>rest-assured</artifactId>
+      <version>${rest-assured.version}</version>
       <scope>test</scope>
       <exclusions>
         <exclusion>
@@ -218,7 +198,7 @@
         <configuration>
           <java>
             <googleJavaFormat>
-              <version>1.21.0</version>
+              <version>1.36.1</version>
               <style>AOSP</style>
               <reflowLongStrings>true</reflowLongStrings>
             </googleJavaFormat>

@@ -15,9 +15,10 @@ An Apache Fineract plugin that lets master users list, create, update, activate,
 
 ## Requirements
 
-- Java 21
-- Apache Fineract `1.15.0-SNAPSHOT` or later (the plugin compiles against the Mifos Artifactory
-  snapshot)
+- Java 25
+- Spring Boot 4.1
+- Apache Fineract `1.16.0-SNAPSHOT` (`develop` branch); the plugin compiles against Fineract
+  builds published to the Mifos Artifactory
 - PostgreSQL or MariaDB/MySQL tenant store
 - Docker, to run the integration tests
 
@@ -27,7 +28,7 @@ An Apache Fineract plugin that lets master users list, create, update, activate,
 ./mvnw clean package
 ```
 
-The plugin jar is written to `target/tenantmanagement-plugin-1.15.0-SNAPSHOT.jar`. Fineract is a
+The plugin jar is written to `target/tenantmanagement-plugin-1.16.0-SNAPSHOT.jar`. Fineract is a
 `provided` dependency, so the jar holds only this plugin's own classes and resources.
 
 ## Deploy with Fineract
@@ -36,7 +37,7 @@ Put the jar on Fineract's classpath. For the `apache/fineract` Docker image:
 
 ```bash
 docker run ... \
-  -v "$PWD/target/tenantmanagement-plugin-1.15.0-SNAPSHOT.jar:/app/plugins/tenantmanagement-plugin.jar" \
+  -v "$PWD/target/tenantmanagement-plugin-1.16.0-SNAPSHOT.jar:/app/plugins/tenantmanagement-plugin.jar" \
   --entrypoint sh apache/fineract:develop -c \
   'CLASSPATH=$(cat /app/jib-classpath-file) && exec java $JAVA_TOOL_OPTIONS -cp /app/plugins/tenantmanagement-plugin.jar:$CLASSPATH org.apache.fineract.ServerApplication'
 ```
