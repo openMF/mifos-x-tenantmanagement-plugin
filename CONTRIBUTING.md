@@ -11,7 +11,7 @@ To ensure a smooth collaboration process and maintain code quality, we enforce a
 - Always follow the [code of conduct](https://mifos.org/resources/community/code-of-conduct/) - this is important to us.
 - Learn more at our [getting started guide](https://mifosforge.jira.com/wiki/spaces/RES/pages/464322561/New+Contributor+Getting+Started+Guide).
 - Have a look at our [Wiki](https://github.com/openMF/mifos-x-tenantmanagement-plugin/wiki).
-- Sign up to Mifos Slack
+- Sign up to [Mifos Slack](https://mifos.slack.com)
 
 ---
 
@@ -25,14 +25,13 @@ We avoid "surprise" contributions. Before writing code, you must validate your i
 
 ## Step 1: Discuss on Slack
 
-Before you start coding (especially for new features, UI changes, or refactoring), you must signal your intent.
+Before you start coding (especially for new features, API changes, or refactoring), you must signal your intent.
 
 1. **Join the Community:** [Mifos Slack](https://mifos.slack.com)
-2. **Find the Channel:** Navigate to `# channel for repo`
-3. **Post Your Proposal:**
+2. **Post Your Proposal:**
    - **Features:** Explain what you want to build and why.
-   - **Bugs:** Briefly explain the issue and provide screenshots if applicable.
-4. **Wait for Approval:** Do not proceed until a maintainer or community member acknowledges the task is valid and free for you to take.
+   - **Bugs:** Briefly explain the issue, with the request, response and logs where applicable.
+3. **Wait for Approval:** Do not proceed until a maintainer or community member acknowledges the task is valid and free for you to take.
 
 ---
 
@@ -41,15 +40,14 @@ Before you start coding (especially for new features, UI changes, or refactoring
 All development work is tracked in Jira to manage the release backlog and ensure transparency.
 
 - **System:** [Mifos Jira](https://mifosforge.jira.com)
-- **Project:** [PROJECT NAME]
-- **Board:** [Board 166](https://mifosforge.jira.com/jira/software/c/projects/MXWAR/boards/166) (Active Development Board)
+- **Project:** [MX (Mifos-X)](https://mifosforge.jira.com/browse/MX)
 
 ### Workflow
 
-1. **Search:** Check the [Jira Board](https://mifosforge.jira.com/jira/software/c/projects/MXWAR/boards/166) to ensure the ticket doesn't already exist.
-2. **Create:** If unique, create a new ticket in Project MXWAR.
-   - **Summary:** `[Component] Concise description` (e.g., `[Client] Fix submit button alignment`)
-   - **Description:** Steps to reproduce, expected result, actual result, and environment details.
+1. **Search:** Check the [MX project](https://mifosforge.jira.com/browse/MX) to ensure the ticket doesn't already exist.
+2. **Create:** If unique, create a new ticket in Project MX.
+   - **Summary:** `[Component] Concise description` (e.g., `[Tenant Management] Validate tenant timezone on update`)
+   - **Description:** Steps to reproduce, expected result, actual result, and environment details (Fineract version, database engine).
 3. **Assign:**
    - Assign the ticket to yourself if you have permissions.
    - If you lack permissions, comment "I am working on this" on the ticket and ask a maintainer to assign it to you.
@@ -67,8 +65,8 @@ We follow a strict branching model to keep our history clean.
 
 - **Upstream Branch:** Always branch from `dev`. Never branch from `master` or `main`.
 - **Naming Convention:** Your branch name must include the Jira Ticket ID.
-  - **Format:** `MXWAR-<ID>-<short-description>`
-  - **Example:** `git checkout -b MXWAR-123-fix-login-button`
+  - **Format:** `MX-<ID>-<short-description>`
+  - **Example:** `git checkout -b MX-123-validate-tenant-timezone`
 
 ### Reserved Branch Names
 
@@ -87,38 +85,50 @@ The following branch names and tags (and their derivatives/extensions) are reser
 
 ---
 
-## Step 4: UI/UX Consistency
+## Step 4: Development Setup
 
-The Web App utilizes React with ShadCN UI and Tailwind CSS. Design consistency is critical for user trust in financial software.
+### Prerequisites
 
-### Visual Checks
+| Requirement | Version |
+|---|---|
+| Java (JDK) | **21** |
+| Maven | 3.9+ (or use the included `./mvnw` wrapper) |
+| Docker | Required for integration tests ([Testcontainers](https://testcontainers.com/)) |
+| Apache Fineract | **1.15.0-SNAPSHOT** (`develop` branch) |
 
-- **Reference:** Match the Figma mockup or the existing page layout exactly.
-- **Grid System:** Spacing must be multiples of 8px (8px, 16px, 24px). Do not use arbitrary values like 10px or 15px.
-- **Typography:** Use standard fonts and weights defined in the Tailwind configuration.
-- **Components:** Always use ShadCN UI components instead of native HTML tags when possible.
+### Build and Test
 
-### Evidence Requirement
+```bash
+# Build the plugin jar without running tests
+./mvnw clean package -DskipTests
 
-You must attach **"Before"** and **"After"** screenshots to your Pull Request description. PRs involving UI changes without screenshots will be declined.
+# Unit tests only (no Docker)
+./mvnw clean test
+
+# Full pipeline including integration tests (Docker required)
+./mvnw clean verify
+```
+
+- **Write tests:** new features and bug fixes must include test coverage. Unit tests are named `*Test.java`; tests that need Docker are named `*IntegrationTest.java` and run in the `verify` phase.
+- **License header:** every new source file starts with the MPL-2.0 header used throughout the codebase.
 
 ---
 
-## Step 5: Code Formatting (Prettier)
+## Step 5: Code Formatting (Spotless)
 
-We use Prettier to enforce a consistent code style automatically. This eliminates "style wars" in code review.
+We use [Spotless](https://github.com/diffplug/spotless) with [google-java-format](https://github.com/google/google-java-format) (AOSP style, 4-space indent) to enforce a consistent code style automatically. This eliminates "style wars" in code review.
 
-- **Configuration:** The project includes a `.prettierrc` or Prettier configuration in `package.json`.
-- **Run Prettier:** Before committing, run the following command in the root directory:
+- **Configuration:** The formatter is configured in `pom.xml`, and the check runs as part of the build.
+- **Run Spotless:** Before committing, run the following command in the root directory:
   ```bash
-  npx prettier --write .
+  ./mvnw spotless:apply
   ```
-- **Linting:** Ensure your code passes linting:
+- **Verify:** Ensure the build and tests pass:
   ```bash
-  npm run lint
+  ./mvnw clean verify
   ```
 
-> ⚠️ If the CI build fails due to formatting or linting errors, your PR will not be reviewed.
+> ⚠️ If the CI build fails due to formatting or test failures, your PR will not be reviewed.
 
 ---
 
@@ -129,7 +139,7 @@ We maintain a linear, meaningful git history.
 - **One Feature = One PR:** Do not combine unrelated fixes.
 - **Squash Requirement:** If your PR contains more than 2 commits, you must squash them.
   - ❌ **Bad History:** `init`, `wip`, `typo`, `fix`, `fix again`
-  - ✅ **Good History:** `MXWAR-123: Implement client search functionality`
+  - ✅ **Good History:** `MX-123: Validate tenant timezone on update`
 
 **How to Squash (Example for last 2 commits):**
 
@@ -174,11 +184,12 @@ We maintain a linear, meaningful git history.
 When you are ready to submit your PR:
 
 - [ ] **Target:** The `dev` branch.
-- [ ] **Title:** Includes the Jira Key (e.g., `MXWAR-123: Fix login button`).
+- [ ] **Title:** Includes the Jira Key (e.g., `MX-123: Validate tenant timezone on update`).
 - [ ] **Description:** Includes a link to the Jira ticket.
 - [ ] **Context:** Includes a link to the Slack discussion or summary of approval.
-- [ ] **Visuals:** "Before" and "After" screenshots are attached (if UI related).
-- [ ] **Quality:** Prettier formatting is applied and linting passes.
+- [ ] **Tests:** New or changed behaviour is covered, and `./mvnw clean verify` passes.
+- [ ] **Quality:** `./mvnw spotless:apply` has been run.
+- [ ] **API changes:** Any REST API change keeps the committed API reference in `api-reference/` up to date.
 
 ---
 
@@ -337,7 +348,7 @@ If running a build is not required for a particular commit (in some cases like a
 
 ## Getting Help
 
-If you get stuck, please reach out in the `#web-app` channel on [Slack](https://mifos.slack.com). We are happy to help you navigate the codebase or troubleshoot environment issues!
+If you get stuck, please reach out to the community on [Mifos Slack](https://mifos.slack.com). We are happy to help you navigate the codebase or troubleshoot environment issues!
 
 ---
 
