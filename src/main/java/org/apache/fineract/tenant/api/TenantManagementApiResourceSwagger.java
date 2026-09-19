@@ -20,6 +20,95 @@ final class TenantManagementApiResourceSwagger {
 
     private TenantManagementApiResourceSwagger() {}
 
+    @Schema(description = "PostTenantsRequest")
+    static final class PostTenantsRequest {
+        private PostTenantsRequest() {}
+
+        @Schema(
+                requiredMode = Schema.RequiredMode.REQUIRED,
+                example = "acme",
+                description = "Unique, lower case; cannot be changed later")
+        public String identifier;
+
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED, example = "Acme Microfinance")
+        public String name;
+
+        @Schema(
+                requiredMode = Schema.RequiredMode.REQUIRED,
+                example = "Asia/Kolkata",
+                description = "IANA time zone")
+        public String timezoneId;
+
+        @Schema(
+                example = "ACTIVE",
+                description = "ACTIVE, INACTIVE or SUSPENDED; defaults to ACTIVE")
+        public String status;
+
+        @Schema(example = "Pilot tenant")
+        public String description;
+
+        @Schema(example = "ops@acme.example.org")
+        public String contactEmail;
+
+        @Schema(
+                requiredMode = Schema.RequiredMode.REQUIRED,
+                example = "mifostenant_acme",
+                description =
+                        "Letters, digits and underscore, starting with a letter or underscore, at"
+                            + " most 63 characters, stored in lower case. Created if absent; must"
+                            + " not belong to another tenant.")
+        public String schemaName;
+
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED, example = "localhost")
+        public String schemaServer;
+
+        @Schema(
+                requiredMode = Schema.RequiredMode.REQUIRED,
+                example = "5432",
+                description = "1-65535")
+        public String schemaServerPort;
+
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED, example = "fineract")
+        public String schemaUsername;
+
+        @Schema(
+                requiredMode = Schema.RequiredMode.REQUIRED,
+                example = "a-unique-database-secret",
+                description = "Write-only: stored encrypted and never returned by any endpoint")
+        public String schemaPassword;
+
+        @Schema(example = "sslmode=require")
+        public String schemaConnectionParameters;
+
+        @Schema(example = "true", description = "Migrate the schema on startup; defaults to true")
+        public Boolean autoUpdate;
+    }
+
+    @Schema(description = "PostTenantsTestConnectionRequest")
+    static final class PostTestConnectionRequest {
+        private PostTestConnectionRequest() {}
+
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED, example = "mifostenant_acme")
+        public String schemaName;
+
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED, example = "localhost")
+        public String schemaServer;
+
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED, example = "5432")
+        public String schemaServerPort;
+
+        @Schema(requiredMode = Schema.RequiredMode.REQUIRED, example = "fineract")
+        public String schemaUsername;
+
+        @Schema(
+                requiredMode = Schema.RequiredMode.REQUIRED,
+                description = "Used for this probe only; never stored")
+        public String schemaPassword;
+
+        @Schema(example = "sslmode=require")
+        public String schemaConnectionParameters;
+    }
+
     @Schema(description = "GetTenantConnectionResponse - never includes a password")
     static final class GetTenantConnectionResponse {
         private GetTenantConnectionResponse() {}
@@ -108,5 +197,13 @@ final class TenantManagementApiResourceSwagger {
 
         @Schema(example = "[\"ACTIVE\", \"INACTIVE\", \"SUSPENDED\"]")
         public List<String> statuses;
+    }
+
+    @Schema(description = "PostTenantsTestConnectionResponse")
+    static final class PostTestConnectionResponse {
+        private PostTestConnectionResponse() {}
+
+        @Schema(example = "true")
+        public Boolean reachable;
     }
 }
