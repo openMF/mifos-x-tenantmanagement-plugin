@@ -30,6 +30,16 @@ public class TenantSchemaUnavailableException extends AbstractPlatformDomainRule
                 schemaName);
     }
 
+    /** The requested database was retained from a removed tenant with a different identifier. */
+    public static TenantSchemaUnavailableException retained(
+            final String schemaName, final String owner) {
+        return new TenantSchemaUnavailableException(
+                "error.msg.tenant.schema.retained",
+                "Database " + schemaName + " holds the retained data of removed tenant " + owner,
+                schemaName,
+                owner);
+    }
+
     /** Another registered tenant already uses the requested database. */
     public static TenantSchemaUnavailableException inUse(
             final String schemaName, final String owner) {

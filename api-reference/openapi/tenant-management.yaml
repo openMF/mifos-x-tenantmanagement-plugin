@@ -159,8 +159,119 @@ paths:
           description: Not authenticated as a master user
         "404":
           description: No tenant has this id
+    put:
+      tags:
+      - Tenant Management
+      summary: Update a Tenant
+      description: |-
+        Updates a tenant. Every field is optional; omitting one leaves it unchanged, and omitting `schemaPassword` keeps the stored credential.
+
+        `identifier` cannot be changed: it is how every request selects a tenant and is embedded in that tenant's existing sessions and integrations. Sending one is rejected rather than ignored.
+      operationId: update
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PutTenantsRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetTenantResponse"
+        "400":
+          description: Validation failed
+        "401":
+          description: Not authenticated as a master user
+        "403":
+          description: Refused by a domain rule
+        "404":
+          description: No tenant has this id
+    post:
+      tags:
+      - Tenant Management
+      summary: Change Tenant Status
+      description: |-
+        Activates, deactivates or suspends a tenant, selected with the `command` query parameter.
+
+        Idempotent: issuing a command a tenant is already in succeeds and changes nothing, so a retried request does not look like a failure.
+      operationId: changeStatus
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: command
+        in: query
+        description: "activate, deactivate or suspend"
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetTenantResponse"
+        "400":
+          description: Validation failed
+        "401":
+          description: Not authenticated as a master user
+        "404":
+          description: No tenant has this id
+    delete:
+      tags:
+      - Tenant Management
+      summary: Remove a Tenant
+      description: |-
+        Removes the tenant's registry entry so the platform stops routing to it.
+
+        This never drops a schema or deletes tenant data: the database is left intact for retention, audit or reinstatement.
+
+        An active tenant is refused; deactivate it first, so removal is a deliberate two-step action.
+      operationId: delete
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteTenantResponse"
+        "401":
+          description: Not authenticated as a master user
+        "403":
+          description: Refused by a domain rule
+        "404":
+          description: No tenant has this id
 components:
   schemas:
+    DeleteTenantResponse:
+      type: object
+      properties:
+        resourceId:
+          type: integer
+          format: int64
+          example: 3
+      description: DeleteTenantsResponse
     GetTenantConnectionResponse:
       type: object
       properties:
@@ -368,6 +479,38 @@ components:
           type: boolean
           example: true
       description: PostTenantsTestConnectionResponse
+    PutTenantsRequest:
+      type: object
+      properties:
+        autoUpdate:
+          type: boolean
+          example: true
+        contactEmail:
+          type: string
+          example: newops@acme.example.org
+        description:
+          type: string
+        name:
+          type: string
+          example: Acme Microfinance Ltd
+        schemaConnectionParameters:
+          type: string
+          example: sslmode=require
+        schemaPassword:
+          type: string
+          description: Write-only; omit to keep the stored password
+        schemaServer:
+          type: string
+          example: db.internal
+        schemaServerPort:
+          type: string
+          example: "5432"
+        schemaUsername:
+          type: string
+          example: fineract
+        timezoneId:
+          type: string
+          example: Asia/Kolkata
   securitySchemes:
     masterBasicAuth:
       type: http

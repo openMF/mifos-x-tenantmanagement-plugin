@@ -206,4 +206,46 @@ final class TenantManagementApiResourceSwagger {
         @Schema(example = "true")
         public Boolean reachable;
     }
+
+    static final class PutTenantsRequest {
+        private PutTenantsRequest() {}
+
+        @Schema(example = "Acme Microfinance Ltd")
+        public String name;
+
+        @Schema(example = "Asia/Kolkata")
+        public String timezoneId;
+
+        @Schema(example = "")
+        public String description;
+
+        @Schema(example = "newops@acme.example.org")
+        public String contactEmail;
+
+        @Schema(example = "db.internal")
+        public String schemaServer;
+
+        @Schema(example = "5432")
+        public String schemaServerPort;
+
+        @Schema(example = "fineract")
+        public String schemaUsername;
+
+        @Schema(description = "Write-only; omit to keep the stored password")
+        public String schemaPassword;
+
+        @Schema(example = "sslmode=require")
+        public String schemaConnectionParameters;
+
+        @Schema(example = "true")
+        public Boolean autoUpdate;
+    }
+
+    @Schema(description = "DeleteTenantsResponse")
+    static final class DeleteTenantResponse {
+        private DeleteTenantResponse() {}
+
+        @Schema(example = "3")
+        public Long resourceId;
+    }
 }

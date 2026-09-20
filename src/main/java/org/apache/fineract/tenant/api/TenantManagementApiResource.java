@@ -14,8 +14,10 @@ import io.swagger.v3.oas.annotations.parameters.RequestBody;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
@@ -30,6 +32,7 @@ import org.apache.fineract.tenant.data.TenantConnectionTestRequest;
 import org.apache.fineract.tenant.data.TenantCreateRequest;
 import org.apache.fineract.tenant.data.TenantData;
 import org.apache.fineract.tenant.data.TenantManagementDataValidator;
+import org.apache.fineract.tenant.data.TenantUpdateRequest;
 import org.apache.fineract.tenant.domain.TenantStatus;
 import org.apache.fineract.tenant.security.TenantMasterAccess;
 import org.apache.fineract.tenant.service.TenantManagementReadService;
@@ -59,6 +62,10 @@ import org.springframework.stereotype.Component;
                         + " never returned.")
 @RequiredArgsConstructor
 public class TenantManagementApiResource {
+
+    private static final String COMMAND_ACTIVATE = "activate";
+    private static final String COMMAND_DEACTIVATE = "deactivate";
+    private static final String COMMAND_SUSPEND = "suspend";
 
     private final TenantManagementReadService readService;
     private final TenantManagementWriteService writeService;
@@ -208,6 +215,131 @@ public class TenantManagementApiResource {
         TenantMasterAccess.requireSuperMaster();
         final TenantCreateRequest request = validator.validateForCreate(apiRequestBodyAsJson);
         return toApiJsonSerializer.serialize(writeService.create(request));
+    }
+
+    /** Applies a partial update to a tenant. */
+    @PUT
+    @Path("/{id}")
+    @Consumes({MediaType.APPLICATION_JSON})
+    @Produces({MediaType.APPLICATION_JSON})
+    @Operation(
+            summary = "Update a Tenant",
+            description =
+                    "Updates a tenant. Every field is optional; omitting one leaves it unchanged,"
+                        + " and omitting `schemaPassword` keeps the stored credential.\n\n"
+                        + "`identifier` cannot be changed: it is how every request selects a tenant"
+                        + " and is embedded in that tenant's existing sessions and integrations."
+                        + " Sending one is rejected rather than ignored.")
+    @ApiResponse(
+            responseCode = "200",
+            description = "OK",
+            content =
+                    @Content(
+                            schema =
+                                    @Schema(
+                                            implementation =
+                                                    TenantManagementApiResourceSwagger
+                                                            .GetTenantResponse.class)))
+    @ApiResponse(responseCode = "400", description = "Validation failed")
+    @ApiResponse(responseCode = "401", description = "Not authenticated as a master user")
+    @ApiResponse(responseCode = "403", description = "Refused by a domain rule")
+    @ApiResponse(responseCode = "404", description = "No tenant has this id")
+    @RequestBody(
+            required = true,
+            content =
+                    @Content(
+                            schema =
+                                    @Schema(
+                                            implementation =
+                                                    TenantManagementApiResourceSwagger
+                                                            .PutTenantsRequest.class)))
+    public String update(
+            @PathParam("id") final Long id,
+            @Parameter(hidden = true) final String apiRequestBodyAsJson) {
+        TenantMasterAccess.requireSuperMaster();
+        final TenantUpdateRequest request = validator.validateForUpdate(apiRequestBodyAsJson);
+        return toApiJsonSerializer.serialize(writeService.update(id, request));
+    }
+
+    /** Moves a tenant between lifecycle states. */
+    @POST
+    @Path("/{id}")
+    @Consumes({MediaType.APPLICATION_JSON})
+    @Produces({MediaType.APPLICATION_JSON})
+    @Operation(
+            summary = "Change Tenant Status",
+            description =
+                    "Activates, deactivates or suspends a tenant, selected with the `command` query"
+                        + " parameter.\n\n"
+                        + "Idempotent: issuing a command a tenant is already in succeeds and"
+                        + " changes nothing, so a retried request does not look like a failure.")
+    @ApiResponse(
+            responseCode = "200",
+            description = "OK",
+            content =
+                    @Content(
+                            schema =
+                                    @Schema(
+                                            implementation =
+                                                    TenantManagementApiResourceSwagger
+                                                            .GetTenantResponse.class)))
+    @ApiResponse(responseCode = "400", description = "Validation failed")
+    @ApiResponse(responseCode = "401", description = "Not authenticated as a master user")
+    @ApiResponse(responseCode = "404", description = "No tenant has this id")
+    public String changeStatus(
+            @PathParam("id") final Long id,
+            @QueryParam("command")
+                    @Parameter(description = "activate, deactivate or suspend", required = true)
+                    final String command) {
+
+        TenantMasterAccess.requireSuperMaster();
+
+        final TenantStatus target =
+                switch (command == null ? "" : command) {
+                    case COMMAND_ACTIVATE -> TenantStatus.ACTIVE;
+                    case COMMAND_DEACTIVATE -> TenantStatus.INACTIVE;
+                    case COMMAND_SUSPEND -> TenantStatus.SUSPENDED;
+                    default ->
+                            throw new UnrecognizedQueryParamException(
+                                    "command",
+                                    command,
+                                    COMMAND_ACTIVATE,
+                                    COMMAND_DEACTIVATE,
+                                    COMMAND_SUSPEND);
+                };
+
+        return toApiJsonSerializer.serialize(writeService.changeStatus(id, target));
+    }
+
+    /** Removes a tenant from the registry, leaving its data intact. */
+    @DELETE
+    @Path("/{id}")
+    @Produces({MediaType.APPLICATION_JSON})
+    @Operation(
+            summary = "Remove a Tenant",
+            description =
+                    "Removes the tenant's registry entry so the platform stops routing to it.\n\n"
+                        + "This never drops a schema or deletes tenant data: the database is left"
+                        + " intact for retention, audit or reinstatement.\n\n"
+                        + "An active tenant is refused; deactivate it first, so removal is a"
+                        + " deliberate two-step action.")
+    @ApiResponse(
+            responseCode = "200",
+            description = "OK",
+            content =
+                    @Content(
+                            schema =
+                                    @Schema(
+                                            implementation =
+                                                    TenantManagementApiResourceSwagger
+                                                            .DeleteTenantResponse.class)))
+    @ApiResponse(responseCode = "401", description = "Not authenticated as a master user")
+    @ApiResponse(responseCode = "403", description = "Refused by a domain rule")
+    @ApiResponse(responseCode = "404", description = "No tenant has this id")
+    public String delete(@PathParam("id") final Long id) {
+        TenantMasterAccess.requireSuperMaster();
+        writeService.delete(id);
+        return toApiJsonSerializer.serialize(Map.of("resourceId", id));
     }
 
     /** Probes a database without registering anything. */
