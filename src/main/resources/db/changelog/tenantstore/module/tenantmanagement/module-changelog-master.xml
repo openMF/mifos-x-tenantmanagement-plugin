@@ -26,5 +26,6 @@
   <include file="parts/001-add-tenant-status-and-metadata.xml" relativeToChangelogFile="true"/>
   <include file="parts/002-create-tenant-administration-audit.xml" relativeToChangelogFile="true"/>
   <include file="parts/003-create-tenant-master-user.xml" relativeToChangelogFile="true"/>
+  <include file="parts/004-create-tenant-retained-schema.xml" relativeToChangelogFile="true"/>
 
 </databaseChangeLog>

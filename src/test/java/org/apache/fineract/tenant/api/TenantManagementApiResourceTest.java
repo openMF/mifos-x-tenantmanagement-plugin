@@ -9,6 +9,7 @@ package org.apache.fineract.tenant.api;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -83,6 +84,8 @@ class TenantManagementApiResourceTest {
                 .thenReturn(new Page<>(List.of(A_TENANT), 1));
         when(readService.retrieveOne(anyLong())).thenReturn(A_TENANT);
         when(writeService.create(any())).thenReturn(A_TENANT);
+        when(writeService.update(anyLong(), any())).thenReturn(A_TENANT);
+        when(writeService.changeStatus(anyLong(), any())).thenReturn(A_TENANT);
 
         resource =
                 new TenantManagementApiResource(
@@ -123,12 +126,18 @@ class TenantManagementApiResourceTest {
         resource.retrieveTemplate();
         resource.retrieveOne(1L);
         resource.create(CREATE_JSON);
+        resource.update(1L, "{\"name\": \"Renamed\"}");
+        resource.changeStatus(1L, "suspend");
+        resource.delete(1L);
         resource.testConnection(CONNECTION_JSON);
 
         verify(readService).retrieveAll(null, null, null, null);
         verify(readService).retrieveTemplate();
         verify(readService).retrieveOne(1L);
         verify(writeService).create(any());
+        verify(writeService).update(eq(1L), any());
+        verify(writeService).changeStatus(1L, TenantStatus.SUSPENDED);
+        verify(writeService).delete(1L);
         verify(provisioningService).isReachable(any(), any(), any(), any(), any(), any());
     }
 
@@ -153,6 +162,10 @@ class TenantManagementApiResourceTest {
         assertThrows(NoAuthorizationException.class, () -> resource.retrieveTemplate());
         assertThrows(NoAuthorizationException.class, () -> resource.retrieveOne(1L));
         assertThrows(
+                NoAuthorizationException.class, () -> resource.update(1L, "{\"name\": \"x\"}"));
+        assertThrows(NoAuthorizationException.class, () -> resource.changeStatus(1L, "suspend"));
+        assertThrows(NoAuthorizationException.class, () -> resource.delete(1L));
+        assertThrows(
                 NoAuthorizationException.class, () -> resource.retrieveAll(null, null, null, null));
         assertThrows(NoAuthorizationException.class, () -> resource.create(CREATE_JSON));
         assertThrows(
@@ -160,6 +173,8 @@ class TenantManagementApiResourceTest {
 
         verify(readService, never()).retrieveTemplate();
         verify(readService, never()).retrieveOne(anyLong());
+        verify(writeService, never()).delete(anyLong());
+        verify(writeService, never()).changeStatus(anyLong(), any());
         verify(writeService, never()).create(any());
         verify(provisioningService, never()).isReachable(any(), any(), any(), any(), any(), any());
     }
@@ -199,5 +214,36 @@ class TenantManagementApiResourceTest {
                 () -> resource.create("{\"identifier\": \"acme\"}"));
 
         verify(writeService, never()).create(any());
+    }
+
+    @Test
+    void changeStatus_mapsEachCommandToItsStatus() {
+        authenticateAs("master", "SUPER_MASTER");
+
+        resource.changeStatus(1L, "activate");
+        resource.changeStatus(1L, "deactivate");
+        resource.changeStatus(1L, "suspend");
+
+        verify(writeService).changeStatus(1L, TenantStatus.ACTIVE);
+        verify(writeService).changeStatus(1L, TenantStatus.INACTIVE);
+        verify(writeService).changeStatus(1L, TenantStatus.SUSPENDED);
+    }
+
+    @Test
+    void changeStatus_rejectsAnUnknownCommand() {
+        authenticateAs("master", "SUPER_MASTER");
+
+        assertThrows(
+                UnrecognizedQueryParamException.class,
+                () -> resource.changeStatus(1L, "obliterate"));
+
+        verify(writeService, never()).changeStatus(anyLong(), any());
+    }
+
+    @Test
+    void changeStatus_rejectsAMissingCommandRatherThanGuessing() {
+        authenticateAs("master", "SUPER_MASTER");
+
+        assertThrows(UnrecognizedQueryParamException.class, () -> resource.changeStatus(1L, null));
     }
 }

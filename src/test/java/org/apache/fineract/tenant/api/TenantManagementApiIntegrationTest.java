@@ -319,4 +319,112 @@ class TenantManagementApiIntegrationTest extends TenantManagementIntegrationTest
                 .then()
                 .statusCode(403);
     }
+
+    // ---------------------------------------------------------------
+    // The rest of the lifecycle
+    // ---------------------------------------------------------------
+
+    @Test
+    @DisplayName("POST /v1/admin/tenants/{id} with an unknown command returns 400")
+    void changeStatus_withAnUnknownCommand_returns400() {
+        asMaster()
+                .body("{}")
+                .when()
+                .post(TENANTS_PATH + "/1?command=obliterate")
+                .then()
+                .statusCode(400);
+    }
+
+    @Test
+    @DisplayName("A tenant can be created, used, suspended, reactivated and removed over HTTP")
+    void fullLifecycle_createUseSuspendReactivateAndRemove() {
+        final String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        final String identifier = "it" + suffix;
+        final String schemaName = "mifostenant_it" + suffix;
+
+        final Response created =
+                asMaster()
+                        .body(createBody(identifier, schemaName))
+                        .when()
+                        .post(TENANTS_PATH)
+                        .then()
+                        .statusCode(200)
+                        .body("identifier", equalTo(identifier))
+                        .body("status", equalTo("ACTIVE"))
+                        .extract()
+                        .response();
+        assertThat(created.asString()).doesNotContainIgnoringCase("password");
+        final int id = created.jsonPath().getInt("id");
+
+        asMaster().when().get(TENANTS_PATH + "/" + id).then().statusCode(200);
+
+        // Migrated and usable at once, by the administrator seeded into the new tenant...
+        asTenantUser(identifier, "mifos", "password")
+                .when()
+                .get(OFFICES_PATH)
+                .then()
+                .statusCode(200);
+
+        // ...who is a tenant user, and so cannot administer tenants.
+        asTenantUser(identifier, "mifos", "password")
+                .when()
+                .get(TENANTS_PATH)
+                .then()
+                .statusCode(401);
+
+        asMaster()
+                .body("{}")
+                .when()
+                .post(TENANTS_PATH + "/" + id + "?command=suspend")
+                .then()
+                .statusCode(200)
+                .body("status", equalTo("SUSPENDED"));
+
+        asTenantUser(identifier, "mifos", "password")
+                .when()
+                .get(OFFICES_PATH)
+                .then()
+                .statusCode(503)
+                .body("tenantStatus", equalTo("SUSPENDED"));
+
+        // A browser client sends its tenant header on every call. Addressing the master
+        // endpoints with the suspended tenant's header must not lock administration out.
+        asMaster()
+                .header("Fineract-Platform-TenantId", identifier)
+                .when()
+                .get(TENANTS_PATH + "/" + id)
+                .then()
+                .statusCode(200);
+
+        asMaster()
+                .body("{}")
+                .when()
+                .post(TENANTS_PATH + "/" + id + "?command=activate")
+                .then()
+                .statusCode(200);
+        asTenantUser(identifier, "mifos", "password")
+                .when()
+                .get(OFFICES_PATH)
+                .then()
+                .statusCode(200);
+
+        asMaster()
+                .body(Map.of("identifier", "renamed"))
+                .when()
+                .put(TENANTS_PATH + "/" + id)
+                .then()
+                .statusCode(400);
+
+        // An active tenant cannot be removed in one step.
+        asMaster().when().delete(TENANTS_PATH + "/" + id).then().statusCode(403);
+
+        asMaster()
+                .body("{}")
+                .when()
+                .post(TENANTS_PATH + "/" + id + "?command=deactivate")
+                .then()
+                .statusCode(200);
+        asMaster().when().delete(TENANTS_PATH + "/" + id).then().statusCode(200);
+        asMaster().when().get(TENANTS_PATH + "/" + id).then().statusCode(404);
+    }
 }

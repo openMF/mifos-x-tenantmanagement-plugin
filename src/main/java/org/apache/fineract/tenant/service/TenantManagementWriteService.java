@@ -12,15 +12,20 @@ import java.sql.SQLException;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import javax.sql.DataSource;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.fineract.infrastructure.core.exception.GeneralPlatformDomainRuleException;
 import org.apache.fineract.infrastructure.core.service.database.DatabasePasswordEncryptor;
 import org.apache.fineract.tenant.data.TenantCreateRequest;
 import org.apache.fineract.tenant.data.TenantData;
 import org.apache.fineract.tenant.data.TenantManagementDataValidator;
+import org.apache.fineract.tenant.data.TenantUpdateRequest;
 import org.apache.fineract.tenant.domain.TenantAdministrationAction;
+import org.apache.fineract.tenant.domain.TenantStatus;
 import org.apache.fineract.tenant.exception.TenantIdentifierAlreadyExistsException;
+import org.apache.fineract.tenant.exception.TenantNotFoundException;
 import org.apache.fineract.tenant.exception.TenantSchemaUnavailableException;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -67,6 +72,7 @@ public class TenantManagementWriteService {
     private final DatabasePasswordEncryptor databasePasswordEncryptor;
     private final TenantProvisioningService provisioningService;
     private final TenantManagementReadService readService;
+    private final TenantStatusLookupService statusLookupService;
     private final TenantSchemaMigrationService schemaMigrationService;
     private final TenantAdministrationAuditService auditService;
     private final ObjectProvider<CacheManager> cacheManagerProvider;
@@ -86,6 +92,7 @@ public class TenantManagementWriteService {
             final DatabasePasswordEncryptor databasePasswordEncryptor,
             final TenantProvisioningService provisioningService,
             final TenantManagementReadService readService,
+            final TenantStatusLookupService statusLookupService,
             final TenantSchemaMigrationService schemaMigrationService,
             final TenantAdministrationAuditService auditService,
             final ObjectProvider<CacheManager> cacheManagerProvider,
@@ -98,6 +105,7 @@ public class TenantManagementWriteService {
         this.databasePasswordEncryptor = databasePasswordEncryptor;
         this.provisioningService = provisioningService;
         this.readService = readService;
+        this.statusLookupService = statusLookupService;
         this.schemaMigrationService = schemaMigrationService;
         this.auditService = auditService;
         this.cacheManagerProvider = cacheManagerProvider;
@@ -105,19 +113,27 @@ public class TenantManagementWriteService {
     }
 
     /**
-     * Drops every cached view of a tenant after it has been registered.
+     * Drops every cached view of a tenant after it has been changed.
      *
-     * <p>Core caches {@code JdbcTenantDetailsService.loadTenantById} under {@code tenantsById}, and
-     * that cache holds the connection details the platform routes on. An identifier that was in use
-     * before - a tenant removed from the registry and created again - can therefore still be
-     * cached, and the new tenant would be routed to the old tenant's database until the entry
-     * expired or the platform restarted.
+     * <p>Two caches hold tenant data and both go stale on a write:
+     *
+     * <ul>
+     *   <li>this plugin's status cache, consulted by the enforcement filter, and
+     *   <li>core's {@code tenantsById}, which caches {@code
+     *       JdbcTenantDetailsService.loadTenantById} and therefore holds the connection details the
+     *       platform routes on.
+     * </ul>
+     *
+     * <p>Without this a suspension would not take hold, and changed connection details would keep
+     * routing to the old server, until the caches expired or the platform restarted.
      *
      * <p>Core's cache is reached through the {@link CacheManager} beans rather than with
      * {@code @CacheEvict}: the annotation would need this class to know the cache's key layout and
      * which of the platform's several managers holds it.
      */
     private void evictCachedViewsOf(final String identifier) {
+        statusLookupService.invalidate(identifier);
+
         // Best effort, and never allowed to escape. This runs after the registry write has
         // committed, so a throw here turns a completed change into a 500 - and on create it
         // also skips the migration, stranding a registered tenant with an empty schema. That
@@ -170,8 +186,12 @@ public class TenantManagementWriteService {
 
         // Before anything is created: the schema step below reuses an existing database of this
         // name, so ownership has to be settled first.
-        assertSchemaAvailable(
-                request.schemaServer(), request.schemaServerPort(), request.schemaName());
+        assertSchemaAvailableFor(
+                identifier,
+                request.schemaServer(),
+                request.schemaServerPort(),
+                request.schemaName(),
+                null);
 
         provisioningService.createSchemaIfAbsent(
                 request.schemaServer(),
@@ -192,6 +212,13 @@ public class TenantManagementWriteService {
         final Long tenantId =
                 transactionTemplate.execute(
                         status -> {
+                            // Reinstating a removed tenant under its own identifier releases the
+                            // retention record; any other identifier was refused above.
+                            releaseRetainedSchema(
+                                    identifier,
+                                    request.schemaServer(),
+                                    request.schemaServerPort(),
+                                    request.schemaName());
                             final Long connectionId = insertConnection(request);
                             return insertTenant(request, identifier, connectionId);
                         });
@@ -373,16 +400,23 @@ public class TenantManagementWriteService {
     /**
      * Refuses a database this tenant must not be bound to.
      *
-     * <p>Creating a tenant reuses an existing database of the requested name, so without these
-     * checks a new identifier could be routed to the registry itself or to another tenant's live
-     * data. Database names are compared case-insensitively, as PostgreSQL folds unquoted names and
-     * MySQL is commonly case-insensitive; servers are compared as written, so {@code localhost} and
-     * {@code 127.0.0.1} count as different servers.
+     * <p>Creating a tenant reuses an existing database of the requested name and removing one keeps
+     * its database, so without these checks a new identifier could be routed to another tenant's
+     * live data or to a removed tenant's retained data. Database names are compared
+     * case-insensitively, as PostgreSQL folds unquoted names and MySQL is commonly
+     * case-insensitive; servers are compared as written, so {@code localhost} and {@code 127.0.0.1}
+     * count as different servers.
      *
+     * @param excludeTenantId the tenant being updated, which may keep its own database; null on
+     *     create
      * @throws TenantSchemaUnavailableException when the database belongs elsewhere
      */
-    private void assertSchemaAvailable(
-            final String schemaServer, final String schemaServerPort, final String schemaName) {
+    private void assertSchemaAvailableFor(
+            final String identifier,
+            final String schemaServer,
+            final String schemaServerPort,
+            final String schemaName,
+            final Long excludeTenantId) {
 
         if (schemaName.equalsIgnoreCase(tenantStoreCatalog())) {
             throw TenantSchemaUnavailableException.tenantStore(schemaName);
@@ -393,14 +427,280 @@ public class TenantManagementWriteService {
                         "select t.identifier from tenants t join tenant_server_connections ts on"
                                 + " ts.id = t.oltp_id or ts.id = t.report_id where"
                                 + " lower(ts.schema_name) = lower(?) and lower(ts.schema_server) ="
-                                + " lower(?) and ts.schema_server_port = ?",
+                                + " lower(?) and ts.schema_server_port = ? and t.id <> ?",
+                        String.class,
+                        schemaName,
+                        schemaServer,
+                        schemaServerPort,
+                        excludeTenantId == null ? -1L : excludeTenantId);
+        if (!owners.isEmpty()) {
+            throw TenantSchemaUnavailableException.inUse(schemaName, owners.get(0));
+        }
+
+        final List<String> retainedFor =
+                jdbcTemplate.queryForList(
+                        "select tenant_identifier from tenant_retained_schema where"
+                            + " lower(schema_name) = lower(?) and lower(schema_server) = lower(?)"
+                            + " and schema_server_port = ?",
                         String.class,
                         schemaName,
                         schemaServer,
                         schemaServerPort);
-        if (!owners.isEmpty()) {
-            throw TenantSchemaUnavailableException.inUse(schemaName, owners.get(0));
+        for (final String owner : retainedFor) {
+            if (!owner.equals(identifier)) {
+                throw TenantSchemaUnavailableException.retained(schemaName, owner);
+            }
         }
+    }
+
+    /**
+     * Applies a partial update. Fields left null on the request keep their stored value.
+     *
+     * @throws TenantNotFoundException when no tenant has that id
+     */
+    public TenantData update(final Long id, final TenantUpdateRequest request) {
+        final TenantData existing = readService.retrieveOne(id);
+
+        if (existing.connection() != null
+                && (request.schemaServer() != null || request.schemaServerPort() != null)) {
+            // Moving a tenant to another server or port can land it on a database that belongs to
+            // someone else, so the same ownership rules as create apply.
+            assertSchemaAvailableFor(
+                    existing.identifier(),
+                    request.schemaServer() != null
+                            ? request.schemaServer()
+                            : existing.connection().schemaServer(),
+                    request.schemaServerPort() != null
+                            ? request.schemaServerPort()
+                            : existing.connection().schemaServerPort(),
+                    existing.connection().schemaName(),
+                    id);
+        }
+
+        transactionTemplate.executeWithoutResult(
+                status -> {
+                    updateTenantRow(id, request);
+                    updateConnectionRow(existing, request);
+                });
+
+        evictCachedViewsOf(existing.identifier());
+        auditService.recordSuccess(
+                TenantAdministrationAction.UPDATE,
+                existing.identifier(),
+                id,
+                "changed: " + String.join(", ", request.changedFieldNames()));
+
+        log.info("Updated tenant {}", existing.identifier());
+        return readService.retrieveOne(id);
+    }
+
+    private void updateTenantRow(final Long id, final TenantUpdateRequest request) {
+        final List<String> assignments = new ArrayList<>();
+        final List<Object> arguments = new ArrayList<>();
+
+        addAssignment(assignments, arguments, "name", request.name());
+        addAssignment(assignments, arguments, "timezone_id", request.timezoneId());
+        addAssignment(assignments, arguments, "description", request.description());
+        addAssignment(assignments, arguments, "contact_email", request.contactEmail());
+
+        if (assignments.isEmpty()) {
+            return;
+        }
+
+        assignments.add("lastmodified_date = ?");
+        arguments.add(LocalDateTime.now(ZoneOffset.UTC));
+        arguments.add(id);
+
+        // Column names come only from the literals above, never from the request, so the
+        // joined fragment carries no caller-supplied text. Every value is bound.
+        jdbcTemplate.update(
+                "update tenants set " + String.join(", ", assignments) + " where id = ?",
+                arguments.toArray());
+    }
+
+    private void updateConnectionRow(final TenantData existing, final TenantUpdateRequest request) {
+        if (existing.connection() == null) {
+            return;
+        }
+
+        final List<String> assignments = new ArrayList<>();
+        final List<Object> arguments = new ArrayList<>();
+
+        addAssignment(assignments, arguments, "schema_server", request.schemaServer());
+        addAssignment(assignments, arguments, "schema_server_port", request.schemaServerPort());
+        addAssignment(assignments, arguments, "schema_username", request.schemaUsername());
+        addAssignment(
+                assignments,
+                arguments,
+                "schema_connection_parameters",
+                request.schemaConnectionParameters());
+
+        if (request.schemaPassword() != null) {
+            // Re-encrypted on the way in, and the master hash re-stamped alongside it so the
+            // row stays openable by this platform.
+            assignments.add("schema_password = ?");
+            arguments.add(databasePasswordEncryptor.encrypt(request.schemaPassword()));
+            assignments.add("master_password_hash = ?");
+            arguments.add(databasePasswordEncryptor.getMasterPasswordHash());
+        }
+        if (request.autoUpdate() != null) {
+            assignments.add("auto_update = ?");
+            // An int for the same reason as on insert: the column is TINYINT, and
+            // PostgreSQL will not accept a boolean for it.
+            arguments.add(request.autoUpdate() ? 1 : 0);
+        }
+
+        if (assignments.isEmpty()) {
+            return;
+        }
+
+        arguments.add(existing.connection().id());
+        jdbcTemplate.update(
+                "update tenant_server_connections set "
+                        + String.join(", ", assignments)
+                        + " where id = ?",
+                arguments.toArray());
+    }
+
+    /**
+     * Moves a tenant between lifecycle states.
+     *
+     * @return the tenant as stored
+     * @throws TenantNotFoundException when no tenant has that id
+     */
+    public TenantData changeStatus(final Long id, final TenantStatus status) {
+        final TenantData existing = readService.retrieveOne(id);
+
+        if (existing.status() == status) {
+            // Idempotent: re-activating an active tenant is not an error, and reporting one
+            // would make a retried request look like a failure.
+            return existing;
+        }
+
+        jdbcTemplate.update(
+                "update tenants set status = ?, lastmodified_date = ? where id = ?",
+                status.name(),
+                LocalDateTime.now(ZoneOffset.UTC),
+                id);
+
+        evictCachedViewsOf(existing.identifier());
+        auditService.recordSuccess(
+                TenantAdministrationAction.forStatusChange(status),
+                existing.identifier(),
+                id,
+                "from="
+                        + (existing.status() == null ? "UNRECOGNISED" : existing.status().name())
+                        + ", to="
+                        + status.name());
+
+        log.info("Tenant {} moved from {} to {}", existing.identifier(), existing.status(), status);
+        return readService.retrieveOne(id);
+    }
+
+    /**
+     * Removes a tenant from the registry.
+     *
+     * <p><strong>This never drops a schema or deletes tenant data.</strong> It removes the routing
+     * entry only, which is the archive semantics MX-406 asks for: the tenant stops being reachable,
+     * and its database is left intact for retention, audit or reinstatement. Dropping a live
+     * financial database from an HTTP endpoint is not a capability this API should have.
+     *
+     * <p>Refuses to remove an active tenant. Deactivating first is one extra call, and it makes
+     * removal a deliberate two-step action rather than something a single mistaken request can do
+     * to a tenant that is currently serving users.
+     *
+     * @throws TenantNotFoundException when no tenant has that id
+     */
+    public void delete(final Long id) {
+        final TenantData existing = readService.retrieveOne(id);
+
+        if (existing.status() == TenantStatus.ACTIVE) {
+            throw activeTenantCannotBeRemoved(existing.identifier());
+        }
+
+        retireRegistryRows(existing);
+
+        evictCachedViewsOf(existing.identifier());
+        // tenantId is recorded as null: the row it referred to no longer exists, and the
+        // trail must not point at an id that could later be reused by another tenant.
+        auditService.recordSuccess(
+                TenantAdministrationAction.DELETE,
+                existing.identifier(),
+                null,
+                "schema left intact: "
+                        + (existing.connection() == null
+                                ? "(unknown)"
+                                : existing.connection().schemaName()));
+
+        log.info(
+                "Removed tenant {} from the registry; its schema {} was left intact",
+                existing.identifier(),
+                existing.connection() == null ? "(unknown)" : existing.connection().schemaName());
+    }
+
+    /**
+     * Drops the retention record when a removed tenant is created again under its own identifier.
+     */
+    private void releaseRetainedSchema(
+            final String identifier,
+            final String schemaServer,
+            final String schemaServerPort,
+            final String schemaName) {
+        jdbcTemplate.update(
+                "delete from tenant_retained_schema where tenant_identifier = ?"
+                        + " and lower(schema_name) = lower(?) and lower(schema_server) = lower(?)"
+                        + " and schema_server_port = ?",
+                identifier,
+                schemaName,
+                schemaServer,
+                schemaServerPort);
+    }
+
+    /**
+     * Removes a tenant's registry rows and records its retained database, in one transaction.
+     *
+     * <p>The database is kept, so its ownership is kept with it: only this identifier may bind to
+     * it again. Compensation after a failed create uses {@link #removeRegistryRows} instead, which
+     * records nothing - that schema never held a working tenant, and a retry must be able to reuse
+     * it.
+     */
+    private void retireRegistryRows(final TenantData existing) {
+        transactionTemplate.executeWithoutResult(
+                status -> {
+                    // Conditional on status in the same statement: a concurrent activation that
+                    // commits
+                    // after delete()'s own check must still stop the removal.
+                    final int removed =
+                            jdbcTemplate.update(
+                                    "delete from tenants where id = ? and status <> ?",
+                                    existing.id(),
+                                    TenantStatus.ACTIVE.name());
+                    if (removed == 0) {
+                        final Integer remaining =
+                                jdbcTemplate.queryForObject(
+                                        "select count(*) from tenants where id = ?",
+                                        Integer.class,
+                                        existing.id());
+                        if (remaining == null || remaining == 0) {
+                            throw new TenantNotFoundException(existing.id());
+                        }
+                        throw activeTenantCannotBeRemoved(existing.identifier());
+                    }
+                    if (existing.connection() != null) {
+                        jdbcTemplate.update(
+                                "delete from tenant_server_connections where id = ?",
+                                existing.connection().id());
+                        jdbcTemplate.update(
+                                "insert into tenant_retained_schema (tenant_identifier,"
+                                        + " schema_server, schema_server_port, schema_name,"
+                                        + " retained_at) values (?, ?, ?, ?, ?)",
+                                existing.identifier(),
+                                existing.connection().schemaServer(),
+                                existing.connection().schemaServerPort(),
+                                existing.connection().schemaName(),
+                                LocalDateTime.now(ZoneOffset.UTC));
+                    }
+                });
     }
 
     /**
@@ -418,6 +718,27 @@ public class TenantManagementWriteService {
         }
         this.tenantStoreCatalog = catalog == null ? "" : catalog;
         return this.tenantStoreCatalog;
+    }
+
+    private static GeneralPlatformDomainRuleException activeTenantCannotBeRemoved(
+            final String identifier) {
+        return new GeneralPlatformDomainRuleException(
+                "error.msg.tenant.cannot.be.removed.while.active",
+                "Tenant " + identifier + " must be deactivated before it is removed",
+                identifier);
+    }
+
+    private static void addAssignment(
+            final List<String> assignments,
+            final List<Object> arguments,
+            final String column,
+            final Object value) {
+        if (value != null) {
+            assignments.add(column + " = ?");
+            // An empty string is an explicit clear of an optional field, stored as NULL like a
+            // field that was never set.
+            arguments.add("".equals(value) ? null : value);
+        }
     }
 
     private static Long requireKey(final KeyHolder keyHolder, final String table) {

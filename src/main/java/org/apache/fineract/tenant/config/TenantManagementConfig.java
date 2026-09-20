@@ -10,11 +10,15 @@ import javax.sql.DataSource;
 import liquibase.integration.spring.SpringLiquibase;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.fineract.infrastructure.core.service.migration.ExtendedSpringLiquibaseFactory;
+import org.apache.fineract.tenant.filter.TenantStatusEnforcementFilter;
 import org.apache.fineract.tenant.service.CoreTenantLiquibaseFactory;
+import org.apache.fineract.tenant.service.TenantStatusLookupService;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.DependsOn;
+import org.springframework.core.Ordered;
 
 /**
  * Wiring for tenant administration against the central tenant store.
@@ -81,5 +85,34 @@ public class TenantManagementConfig {
 
         log.info("Tenant administration migrations completed");
         return "Tenant administration migrations completed";
+    }
+
+    /**
+     * The status filter, as a plain bean so it is not auto-registered a second time.
+     *
+     * <p>A filter annotated {@code @Component} is picked up by Spring Boot's servlet
+     * auto-registration as well as by the registration below, which would run it twice per request.
+     */
+    @Bean
+    public TenantStatusEnforcementFilter tenantStatusEnforcementFilter(
+            final TenantStatusLookupService statusLookupService) {
+        return new TenantStatusEnforcementFilter(statusLookupService);
+    }
+
+    /**
+     * Puts the status filter in front of everything else.
+     *
+     * <p>Ordered ahead of Spring Security's chain so a suspended tenant is turned away before any
+     * credential is read, and mapped to every path because a suspension has to hold for the whole
+     * platform, not only for the endpoints this plugin adds.
+     */
+    @Bean
+    public FilterRegistrationBean<TenantStatusEnforcementFilter>
+            tenantStatusEnforcementFilterRegistration(final TenantStatusEnforcementFilter filter) {
+        final FilterRegistrationBean<TenantStatusEnforcementFilter> registration =
+                new FilterRegistrationBean<>(filter);
+        registration.addUrlPatterns("/*");
+        registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 10);
+        return registration;
     }
 }

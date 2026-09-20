@@ -6,12 +6,24 @@
  */
 package org.apache.fineract.tenant.domain;
 
-/**
- * The tenant administration actions recorded in the audit trail.
- *
- * <p>One constant per endpoint that changes the registry. The rest of the vocabulary arrives with
- * the endpoints that record it, so the enum never names an action nothing can perform.
- */
+/** The tenant administration actions recorded in the audit trail. */
 public enum TenantAdministrationAction {
-    CREATE
+    CREATE,
+    UPDATE,
+    ACTIVATE,
+    DEACTIVATE,
+    SUSPEND,
+    DELETE;
+
+    /**
+     * @param status the status a tenant is moving to
+     * @return the action that records that move
+     */
+    public static TenantAdministrationAction forStatusChange(final TenantStatus status) {
+        return switch (status) {
+            case ACTIVE -> ACTIVATE;
+            case INACTIVE -> DEACTIVATE;
+            case SUSPENDED -> SUSPEND;
+        };
+    }
 }

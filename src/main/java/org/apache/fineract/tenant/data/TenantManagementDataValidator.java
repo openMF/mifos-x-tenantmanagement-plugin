@@ -213,6 +213,106 @@ public class TenantManagementDataValidator {
     }
 
     /**
+     * Validates an update payload. Absent fields mean "leave unchanged".
+     *
+     * @param json request body
+     * @return the validated request
+     * @throws InvalidJsonException when the body is absent
+     * @throws PlatformApiDataValidationException when a supplied field is malformed, or the body
+     *     would change nothing
+     */
+    public TenantUpdateRequest validateForUpdate(final String json) {
+        if (StringUtils.isBlank(json)) {
+            throw new InvalidJsonException();
+        }
+
+        final List<ApiParameterError> errors = new ArrayList<>();
+        final DataValidatorBuilder validator =
+                new DataValidatorBuilder(errors).resource(RESOURCE_NAME);
+        final JsonElement element = this.fromApiJsonHelper.parse(json);
+
+        // Rejected rather than ignored. Silently dropping an identifier the caller believed
+        // it was changing is worse than refusing: the caller would carry on assuming the
+        // rename took effect.
+        if (this.fromApiJsonHelper.parameterExists("identifier", element)) {
+            validator.reset().parameter("identifier").value(null).failWithCode("cannot.be.changed");
+        }
+
+        final String name = requiredWhenPresent(validator, element, "name");
+        validator.reset().parameter("name").value(name).ignoreIfNull().notExceedingLengthOf(100);
+
+        final String timezoneId = requiredWhenPresent(validator, element, "timezoneId");
+        validateTimezone(validator, timezoneId);
+
+        final String description = clearableWhenPresent(element, "description");
+        validator
+                .reset()
+                .parameter("description")
+                .value(description)
+                .ignoreIfNull()
+                .notExceedingLengthOf(500);
+
+        final String contactEmail = clearableWhenPresent(element, "contactEmail");
+        validateEmail(validator, contactEmail);
+
+        final String schemaServer = requiredWhenPresent(validator, element, "schemaServer");
+        validator
+                .reset()
+                .parameter("schemaServer")
+                .value(schemaServer)
+                .ignoreIfNull()
+                .notExceedingLengthOf(100);
+
+        final String schemaServerPort = requiredWhenPresent(validator, element, "schemaServerPort");
+        if (schemaServerPort != null) {
+            validator
+                    .reset()
+                    .parameter("schemaServerPort")
+                    .value(schemaServerPort)
+                    .matchesRegularExpression(PORT_PATTERN.pattern());
+            validatePortRange(validator, schemaServerPort);
+        }
+
+        final String schemaUsername = requiredWhenPresent(validator, element, "schemaUsername");
+        validator
+                .reset()
+                .parameter("schemaUsername")
+                .value(schemaUsername)
+                .ignoreIfNull()
+                .notExceedingLengthOf(100);
+
+        final String schemaPassword = extract("schemaPassword", element);
+        if (schemaPassword != null) {
+            validator.reset().parameter("schemaPassword").value(schemaPassword).notBlank();
+        }
+
+        final String connectionParameters =
+                clearableWhenPresent(element, "schemaConnectionParameters");
+        final Boolean autoUpdate =
+                this.fromApiJsonHelper.extractBooleanNamed("autoUpdate", element);
+
+        final TenantUpdateRequest request =
+                new TenantUpdateRequest(
+                        name,
+                        timezoneId,
+                        description,
+                        contactEmail,
+                        schemaServer,
+                        schemaServerPort,
+                        schemaUsername,
+                        schemaPassword,
+                        connectionParameters,
+                        autoUpdate);
+
+        if (errors.isEmpty() && request.isEmpty()) {
+            validator.reset().parameter("id").value(null).failWithCode("no.parameters.for.update");
+        }
+
+        throwIfErrors(errors);
+        return request;
+    }
+
+    /**
      * Validates a connection-test payload.
      *
      * <p>Holds the same shape rules as create - in particular the schema name pattern - so a probe
@@ -373,6 +473,38 @@ public class TenantManagementDataValidator {
      */
     private String extract(final String parameterName, final JsonElement element) {
         return this.fromApiJsonHelper.extractStringNamed(parameterName, element);
+    }
+
+    /**
+     * Reads a field an update may omit but, when it is sent, must carry a value.
+     *
+     * <p>A blank value is refused rather than read as "leave unchanged": a caller who sent {@code
+     * "name": " "} meant to change the name, and quietly applying the rest of the request would
+     * hide that it did not happen.
+     */
+    private String requiredWhenPresent(
+            final DataValidatorBuilder validator,
+            final JsonElement element,
+            final String parameterName) {
+        final String value = trimmed(extract(parameterName, element));
+        if (value == null && this.fromApiJsonHelper.parameterExists(parameterName, element)) {
+            validator.reset().parameter(parameterName).value(null).failWithCode("cannot.be.blank");
+        }
+        return value;
+    }
+
+    /**
+     * Reads an optional field an update may clear.
+     *
+     * @return null when the field is omitted (leave unchanged), an empty string when it is sent
+     *     blank or null (clear it), otherwise the trimmed value
+     */
+    private String clearableWhenPresent(final JsonElement element, final String parameterName) {
+        final String value = trimmed(extract(parameterName, element));
+        if (value == null && this.fromApiJsonHelper.parameterExists(parameterName, element)) {
+            return "";
+        }
+        return value;
     }
 
     /**

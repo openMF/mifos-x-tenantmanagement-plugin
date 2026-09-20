@@ -14,7 +14,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 import com.zaxxer.hikari.HikariConfig;
@@ -38,10 +40,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 import javax.sql.DataSource;
 import liquibase.integration.spring.SpringLiquibase;
+import org.apache.fineract.infrastructure.core.exception.GeneralPlatformDomainRuleException;
 import org.apache.fineract.infrastructure.core.service.Page;
 import org.apache.fineract.infrastructure.core.service.database.DatabasePasswordEncryptor;
 import org.apache.fineract.tenant.data.TenantCreateRequest;
 import org.apache.fineract.tenant.data.TenantData;
+import org.apache.fineract.tenant.data.TenantUpdateRequest;
 import org.apache.fineract.tenant.domain.TenantStatus;
 import org.apache.fineract.tenant.exception.TenantIdentifierAlreadyExistsException;
 import org.apache.fineract.tenant.exception.TenantNotFoundException;
@@ -54,6 +58,7 @@ import org.apache.fineract.tenant.service.TenantManagementReadService;
 import org.apache.fineract.tenant.service.TenantManagementWriteService;
 import org.apache.fineract.tenant.service.TenantProvisioningService;
 import org.apache.fineract.tenant.service.TenantSchemaMigrationService;
+import org.apache.fineract.tenant.service.TenantStatusLookupService;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -188,6 +193,7 @@ class TenantManagementPostgresIntegrationTest {
         jdbcTemplate = new JdbcTemplate(dataSource);
         // Start each test from a known registry. The baseline inserts a 'default' tenant.
         jdbcTemplate.update("delete from tenant_administration_audit");
+        jdbcTemplate.update("delete from tenant_retained_schema");
         jdbcTemplate.update("delete from tenants where identifier <> 'default'");
         jdbcTemplate.update(
                 "delete from tenant_server_connections where id not in (select oltp_id from"
@@ -219,10 +225,34 @@ class TenantManagementPostgresIntegrationTest {
                 encryptor,
                 mock(TenantProvisioningService.class),
                 readService,
+                mock(TenantStatusLookupService.class),
                 mock(TenantSchemaMigrationService.class),
                 new TenantAdministrationAuditService(dataSource),
                 provider,
                 // Migration is stubbed, so creating must not try to run it.
+                false);
+    }
+
+    /** A write service that sees the registry through the given (possibly stale) reads. */
+    private TenantManagementWriteService writeServiceReading(
+            final TenantManagementReadService reads) {
+        final DatabasePasswordEncryptor encryptor = mock(DatabasePasswordEncryptor.class);
+        when(encryptor.encrypt(anyString())).thenAnswer(i -> "enc:" + i.getArgument(0));
+        when(encryptor.getMasterPasswordHash()).thenReturn("test-master-hash");
+
+        @SuppressWarnings("unchecked")
+        final ObjectProvider<CacheManager> noCacheManagers = mock(ObjectProvider.class);
+        when(noCacheManagers.orderedStream()).thenAnswer(i -> Stream.empty());
+
+        return new TenantManagementWriteService(
+                dataSource,
+                encryptor,
+                mock(TenantProvisioningService.class),
+                reads,
+                mock(TenantStatusLookupService.class),
+                mock(TenantSchemaMigrationService.class),
+                new TenantAdministrationAuditService(dataSource),
+                noCacheManagers,
                 false);
     }
 
@@ -761,5 +791,227 @@ class TenantManagementPostgresIntegrationTest {
         } finally {
             TimeZone.setDefault(original);
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Update, status changes and removal
+    // ---------------------------------------------------------------
+
+    @Test
+    void updateChangesOnlyWhatWasSupplied() {
+        final TenantData created = writeService.create(requestFor("acme"));
+
+        final TenantData updated =
+                writeService.update(
+                        created.id(),
+                        new TenantUpdateRequest(
+                                "Renamed", null, null, null, null, null, null, null, null, null));
+
+        assertEquals("Renamed", updated.name());
+        // Untouched fields survive.
+        assertEquals("Asia/Kolkata", updated.timezoneId());
+        assertEquals("ops@example.org", updated.contactEmail());
+        assertEquals("db.example.org", updated.connection().schemaServer());
+    }
+
+    @Test
+    void omittingThePasswordKeepsTheStoredOne() {
+        final TenantData created = writeService.create(requestFor("acme"));
+
+        writeService.update(
+                created.id(),
+                new TenantUpdateRequest(
+                        "Renamed", null, null, null, null, null, null, null, null, null));
+
+        assertEquals(
+                "enc:s3cret",
+                jdbcTemplate.queryForObject(
+                        "select ts.schema_password from tenants t join tenant_server_connections ts"
+                                + " on t.oltp_id = ts.id where t.identifier = 'acme'",
+                        String.class));
+    }
+
+    @Test
+    void rotatingThePasswordReEncryptsItAndReStampsTheMasterHash() {
+        final TenantData created = writeService.create(requestFor("acme"));
+
+        writeService.update(
+                created.id(),
+                new TenantUpdateRequest(
+                        null, null, null, null, null, null, null, "rotated", null, null));
+
+        final var row =
+                jdbcTemplate.queryForMap(
+                        "select ts.schema_password, ts.master_password_hash from tenants t"
+                                + " join tenant_server_connections ts on t.oltp_id = ts.id"
+                                + " where t.identifier = 'acme'");
+
+        assertEquals("enc:rotated", row.get("schema_password"));
+        assertEquals("test-master-hash", row.get("master_password_hash"));
+    }
+
+    @Test
+    void anUpdateRecordsChangedFieldNamesButNotValues() {
+        final TenantData created = writeService.create(requestFor("acme"));
+
+        writeService.update(
+                created.id(),
+                new TenantUpdateRequest(
+                        null, null, null, null, null, null, null, "rotated", null, null));
+
+        final String detail =
+                jdbcTemplate.queryForObject(
+                        "select detail from tenant_administration_audit where action = 'UPDATE'",
+                        String.class);
+
+        assertTrue(detail.contains("schemaPassword"));
+        assertFalse(detail.contains("rotated"));
+    }
+
+    @Test
+    void anUpdateCanClearAnOptionalField() {
+        final TenantData created = writeService.create(requestFor("acme"));
+
+        writeService.update(
+                created.id(),
+                new TenantUpdateRequest(null, null, "", "", null, null, null, null, null, null));
+
+        final TenantData read = readService.retrieveOne(created.id());
+        assertNull(read.description());
+        assertNull(read.contactEmail());
+        assertEquals("Acme Microfinance", read.name());
+    }
+
+    @Test
+    void statusChangesArePersistedAndIdempotent() {
+        final TenantData created = writeService.create(requestFor("acme"));
+
+        assertEquals(
+                TenantStatus.SUSPENDED,
+                writeService.changeStatus(created.id(), TenantStatus.SUSPENDED).status());
+        // Re-issuing the same command succeeds rather than erroring, so a retry does
+        // not look like a failure.
+        assertEquals(
+                TenantStatus.SUSPENDED,
+                writeService.changeStatus(created.id(), TenantStatus.SUSPENDED).status());
+    }
+
+    @Test
+    void anActiveTenantCannotBeRemoved() {
+        final TenantData created = writeService.create(requestFor("acme"));
+
+        assertThrows(
+                GeneralPlatformDomainRuleException.class, () -> writeService.delete(created.id()));
+        assertNotNull(readService.retrieveOne(created.id()));
+    }
+
+    @Test
+    void aDeactivatedTenantIsRemovedFromTheRegistry() {
+        final TenantData created = writeService.create(requestFor("acme"));
+        writeService.changeStatus(created.id(), TenantStatus.INACTIVE);
+
+        writeService.delete(created.id());
+
+        assertThrows(TenantNotFoundException.class, () -> readService.retrieveOne(created.id()));
+        // The connection row goes too, so the registry keeps no orphan.
+        assertEquals(
+                0,
+                jdbcTemplate.queryForObject(
+                        "select count(*) from tenant_server_connections where schema_name ="
+                                + " 'mifostenant_acme'",
+                        Integer.class));
+    }
+
+    @Test
+    void theAuditTrailOutlivesTheTenantItDescribes() {
+        // An audit row that vanished with the tenant whose deletion it recorded would
+        // be worthless, which is why the trail lives in the registry database and
+        // carries the identifier rather than a foreign key.
+        final TenantData created = writeService.create(requestFor("acme"));
+        writeService.changeStatus(created.id(), TenantStatus.INACTIVE);
+        writeService.delete(created.id());
+
+        final var audit =
+                jdbcTemplate.queryForMap(
+                        "select action, tenant_id from tenant_administration_audit where action ="
+                                + " 'DELETE'");
+
+        assertEquals("DELETE", audit.get("action"));
+        // Null so the trail cannot point at an id another tenant may later reuse.
+        assertNull(audit.get("tenant_id"));
+    }
+
+    @Test
+    void everyMutationLeavesATrail() {
+        final TenantData created = writeService.create(requestFor("acme"));
+        writeService.update(
+                created.id(),
+                new TenantUpdateRequest(
+                        "Renamed", null, null, null, null, null, null, null, null, null));
+        writeService.changeStatus(created.id(), TenantStatus.SUSPENDED);
+        writeService.changeStatus(created.id(), TenantStatus.INACTIVE);
+        writeService.delete(created.id());
+
+        final List<String> actions =
+                jdbcTemplate.queryForList(
+                        "select action from tenant_administration_audit where tenant_identifier ="
+                                + " 'acme' order by id",
+                        String.class);
+
+        assertEquals(List.of("CREATE", "UPDATE", "SUSPEND", "DEACTIVATE", "DELETE"), actions);
+    }
+
+    @Test
+    void aRemovedTenantsRetainedDatabaseCannotBeClaimedByAnotherIdentifier() {
+        final TenantData acme = writeService.create(requestFor("acme"));
+        writeService.changeStatus(acme.id(), TenantStatus.INACTIVE);
+        writeService.delete(acme.id());
+
+        assertThrows(
+                TenantSchemaUnavailableException.class,
+                () -> writeService.create(requestFor("intruder", "mifostenant_acme")));
+    }
+
+    @Test
+    void aRemovedTenantCanBeReinstatedUnderItsOwnIdentifier() {
+        final TenantData acme = writeService.create(requestFor("acme"));
+        writeService.changeStatus(acme.id(), TenantStatus.INACTIVE);
+        writeService.delete(acme.id());
+
+        final TenantData reinstated = writeService.create(requestFor("acme"));
+
+        assertEquals("acme", reinstated.identifier());
+        assertEquals(
+                0,
+                jdbcTemplate.queryForObject(
+                        "select count(*) from tenant_retained_schema where tenant_identifier ="
+                                + " 'acme'",
+                        Integer.class));
+    }
+
+    @Test
+    void aTenantActivatedAfterTheDeleteCheckIsNotRemoved() {
+        final TenantData created = writeService.create(requestFor("acme"));
+        writeService.changeStatus(created.id(), TenantStatus.INACTIVE);
+        final TenantData seenInactive = readService.retrieveOne(created.id());
+
+        // A concurrent activation commits after delete() has already read the tenant as inactive.
+        jdbcTemplate.update("update tenants set status = 'ACTIVE' where id = ?", created.id());
+        final TenantManagementReadService staleRead = spy(readService);
+        doReturn(seenInactive).when(staleRead).retrieveOne(created.id());
+
+        assertThrows(
+                GeneralPlatformDomainRuleException.class,
+                () -> writeServiceReading(staleRead).delete(created.id()));
+        assertEquals(
+                1,
+                jdbcTemplate.queryForObject(
+                        "select count(*) from tenants where id = ?", Integer.class, created.id()));
+        assertEquals(
+                0,
+                jdbcTemplate.queryForObject(
+                        "select count(*) from tenant_retained_schema where tenant_identifier ="
+                                + " 'acme'",
+                        Integer.class));
     }
 }

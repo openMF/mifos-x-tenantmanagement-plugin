@@ -7,6 +7,8 @@
 package org.apache.fineract.tenant.data;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -388,5 +390,106 @@ class TenantManagementDataValidatorTest {
                         () -> validator.validateForCreate(json));
 
         assertTrue(parametersInError(thrown).contains("status"));
+    }
+
+    // ---------------------------------------------------------------
+    // Update
+    // ---------------------------------------------------------------
+
+    @Test
+    void update_leavesOmittedFieldsNullSoTheyAreNotOverwritten() {
+        final TenantUpdateRequest request = validator.validateForUpdate("{\"name\": \"Renamed\"}");
+
+        assertEquals("Renamed", request.name());
+        assertNull(request.schemaPassword());
+        assertNull(request.timezoneId());
+        assertNull(request.autoUpdate());
+    }
+
+    @Test
+    void update_rejectsABodyThatWouldChangeNothing() {
+        assertThrows(
+                PlatformApiDataValidationException.class, () -> validator.validateForUpdate("{}"));
+    }
+
+    @Test
+    void update_rejectsAnAttemptToRenameTheIdentifierRatherThanIgnoringIt() {
+        // Silently dropping it would leave the caller believing the rename happened.
+        final PlatformApiDataValidationException thrown =
+                assertThrows(
+                        PlatformApiDataValidationException.class,
+                        () -> validator.validateForUpdate("{\"identifier\": \"renamed\"}"));
+
+        assertTrue(parametersInError(thrown).contains("identifier"));
+    }
+
+    @Test
+    void update_rejectsAPortOutsideTheValidRange() {
+        final PlatformApiDataValidationException thrown =
+                assertThrows(
+                        PlatformApiDataValidationException.class,
+                        () -> validator.validateForUpdate("{\"schemaServerPort\": \"70000\"}"));
+
+        assertTrue(parametersInError(thrown).contains("schemaServerPort"));
+    }
+
+    @Test
+    void update_treatsAWhitespaceOnlyValueAsAbsent() {
+        // Otherwise a stray space would blank a tenant's name.
+        assertThrows(
+                PlatformApiDataValidationException.class,
+                () -> validator.validateForUpdate("{\"name\": \"   \"}"));
+    }
+
+    @Test
+    void update_refusesABlankRequiredFieldInsteadOfApplyingTheRestOfTheRequest() {
+        // {"name":" ","description":"updated"} used to update the description and silently
+        // skip the name.
+        final PlatformApiDataValidationException thrown =
+                assertThrows(
+                        PlatformApiDataValidationException.class,
+                        () ->
+                                validator.validateForUpdate(
+                                        "{\"name\": \" \", \"description\": \"updated\"}"));
+
+        assertTrue(parametersInError(thrown).contains("name"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"timezoneId", "schemaServer", "schemaServerPort", "schemaUsername"})
+    void update_refusesABlankValueForEveryRequiredField(final String field) {
+        final PlatformApiDataValidationException thrown =
+                assertThrows(
+                        PlatformApiDataValidationException.class,
+                        () -> validator.validateForUpdate("{\"" + field + "\": \"   \"}"));
+
+        assertTrue(parametersInError(thrown).contains(field));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"\"\"", "\"   \"", "null"})
+    void update_clearsAnOptionalFieldSentBlankOrNull(final String value) {
+        final TenantUpdateRequest request =
+                validator.validateForUpdate(
+                        "{\"description\": "
+                                + value
+                                + ", \"contactEmail\": "
+                                + value
+                                + ", \"schemaConnectionParameters\": "
+                                + value
+                                + "}");
+
+        assertEquals("", request.description());
+        assertEquals("", request.contactEmail());
+        assertEquals("", request.schemaConnectionParameters());
+        assertFalse(request.isEmpty());
+    }
+
+    @Test
+    void update_leavesAnOmittedOptionalFieldUnchanged() {
+        final TenantUpdateRequest request = validator.validateForUpdate("{\"name\": \"Renamed\"}");
+
+        assertNull(request.description());
+        assertNull(request.contactEmail());
     }
 }
