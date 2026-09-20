@@ -9,32 +9,58 @@ package org.apache.fineract.tenant;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TimeZone;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 import javax.sql.DataSource;
 import liquibase.integration.spring.SpringLiquibase;
 import org.apache.fineract.infrastructure.core.service.Page;
+import org.apache.fineract.infrastructure.core.service.database.DatabasePasswordEncryptor;
+import org.apache.fineract.tenant.data.TenantCreateRequest;
 import org.apache.fineract.tenant.data.TenantData;
 import org.apache.fineract.tenant.domain.TenantStatus;
+import org.apache.fineract.tenant.exception.TenantIdentifierAlreadyExistsException;
 import org.apache.fineract.tenant.exception.TenantNotFoundException;
+import org.apache.fineract.tenant.exception.TenantSchemaUnavailableException;
 import org.apache.fineract.tenant.security.TenantMasterAccess;
 import org.apache.fineract.tenant.security.TenantMasterUserBootstrap;
 import org.apache.fineract.tenant.security.TenantMasterUserStore;
+import org.apache.fineract.tenant.service.TenantAdministrationAuditService;
 import org.apache.fineract.tenant.service.TenantManagementReadService;
+import org.apache.fineract.tenant.service.TenantManagementWriteService;
+import org.apache.fineract.tenant.service.TenantProvisioningService;
+import org.apache.fineract.tenant.service.TenantSchemaMigrationService;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.cache.CacheManager;
+import org.springframework.cache.concurrent.ConcurrentMapCacheManager;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.factory.PasswordEncoderFactories;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -47,10 +73,11 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * changesets apply, that the SQL is valid PostgreSQL, and that the read side sees what the registry
  * holds.
  *
- * <p><strong>Scope.</strong> Tenants are seeded with SQL rather than through an API, because this
- * slice adds only the read side; the write path arrives with tenant creation. The HTTP surface and
- * the security chain are covered by {@code TenantManagementApiIntegrationTest}, which boots a real
- * Fineract.
+ * <p><strong>Scope.</strong> Creation goes through {@link TenantManagementWriteService} with its
+ * provisioning and migration collaborators stubbed: what only a database can answer is the SQL and
+ * the transactions, not Liquibase. Read-only cases still seed with SQL, which also proves the read
+ * projection works against rows it did not produce. The HTTP surface and the security chain are
+ * covered by {@code TenantManagementApiIntegrationTest}, which boots a real Fineract.
  */
 @Testcontainers
 class TenantManagementPostgresIntegrationTest {
@@ -59,6 +86,7 @@ class TenantManagementPostgresIntegrationTest {
     private static HikariDataSource dataSource;
 
     private TenantManagementReadService readService;
+    private TenantManagementWriteService writeService;
     private JdbcTemplate jdbcTemplate;
 
     @BeforeAll
@@ -159,19 +187,72 @@ class TenantManagementPostgresIntegrationTest {
     void setUp() {
         jdbcTemplate = new JdbcTemplate(dataSource);
         // Start each test from a known registry. The baseline inserts a 'default' tenant.
+        jdbcTemplate.update("delete from tenant_administration_audit");
         jdbcTemplate.update("delete from tenants where identifier <> 'default'");
         jdbcTemplate.update(
                 "delete from tenant_server_connections where id not in (select oltp_id from"
                         + " tenants)");
 
         readService = new TenantManagementReadService(dataSource);
+        writeService = writeServiceWithCacheManagers();
+    }
+
+    /**
+     * Builds the write service under test, evicting from the given cache managers.
+     *
+     * <p>Provisioning and migration are stubbed: they reach other databases and run Liquibase,
+     * neither of which is what this class is checking. Encryption is stubbed to a recognisable
+     * prefix so a test can assert the stored value is not the plain password.
+     */
+    private TenantManagementWriteService writeServiceWithCacheManagers(
+            final CacheManager... managers) {
+        final DatabasePasswordEncryptor encryptor = mock(DatabasePasswordEncryptor.class);
+        when(encryptor.encrypt(anyString())).thenAnswer(i -> "enc:" + i.getArgument(0));
+        when(encryptor.getMasterPasswordHash()).thenReturn("test-master-hash");
+
+        @SuppressWarnings("unchecked")
+        final ObjectProvider<CacheManager> provider = mock(ObjectProvider.class);
+        when(provider.orderedStream()).thenAnswer(i -> Stream.of(managers));
+
+        return new TenantManagementWriteService(
+                dataSource,
+                encryptor,
+                mock(TenantProvisioningService.class),
+                readService,
+                mock(TenantSchemaMigrationService.class),
+                new TenantAdministrationAuditService(dataSource),
+                provider,
+                // Migration is stubbed, so creating must not try to run it.
+                false);
+    }
+
+    private static TenantCreateRequest requestFor(final String identifier) {
+        return requestFor(identifier, "mifostenant_" + identifier);
+    }
+
+    private static TenantCreateRequest requestFor(
+            final String identifier, final String schemaName) {
+        return new TenantCreateRequest(
+                identifier,
+                "Acme Microfinance",
+                "Asia/Kolkata",
+                TenantStatus.ACTIVE,
+                "a description",
+                "ops@example.org",
+                schemaName,
+                "db.example.org",
+                "5432",
+                "fineract",
+                "s3cret",
+                null,
+                true);
     }
 
     /**
      * Inserts a tenant and its connection the way the registry holds them.
      *
-     * <p>Written with SQL rather than through a service: the write path is not part of this slice,
-     * and seeding this way also proves the read projection works against rows it did not produce.
+     * <p>Written with SQL rather than through the write service, so the read projection is proved
+     * against rows it did not produce.
      */
     private long seedTenant(
             final String identifier,
@@ -247,6 +328,124 @@ class TenantManagementPostgresIntegrationTest {
                 0,
                 jdbcTemplate.queryForObject(
                         "select count(*) from tenant_master_user", Integer.class));
+    }
+
+    @Test
+    void theAuditTableIsCreated() {
+        assertEquals(
+                0,
+                jdbcTemplate.queryForObject(
+                        "select count(*) from tenant_administration_audit", Integer.class));
+    }
+
+    // ---------------------------------------------------------------
+    // Create
+    // ---------------------------------------------------------------
+
+    @Test
+    void createWritesBothRowsAndReadsBack() {
+        final TenantData created = writeService.create(requestFor("acme"));
+
+        assertNotNull(created.id());
+        assertEquals("acme", created.identifier());
+        assertEquals(TenantStatus.ACTIVE, created.status());
+        assertEquals("Asia/Kolkata", created.timezoneId());
+        assertEquals("ops@example.org", created.contactEmail());
+        assertNotNull(created.connection());
+        assertEquals("mifostenant_acme", created.connection().schemaName());
+        // Populated so a tenant created through the API is not the only one in the
+        // registry with a blank joined date.
+        assertNotNull(created.joinedDate());
+        assertNotNull(created.createdDate());
+    }
+
+    @Test
+    void createStoresTheEncryptedPasswordAndTheMasterHash() {
+        // Without the master hash, core's TenantDataSourceFactory refuses to open the
+        // tenant at all - failing later, at startup, with "Invalid master password".
+        writeService.create(requestFor("acme"));
+
+        final var row =
+                jdbcTemplate.queryForMap(
+                        "select ts.schema_password, ts.master_password_hash from tenants t"
+                                + " join tenant_server_connections ts on t.oltp_id = ts.id"
+                                + " where t.identifier = 'acme'");
+
+        assertEquals("enc:s3cret", row.get("schema_password"));
+        assertEquals("test-master-hash", row.get("master_password_hash"));
+    }
+
+    @Test
+    void aCreatedTenantsPasswordIsNeverReturnedByAnyRead() {
+        writeService.create(requestFor("acme"));
+
+        final TenantData read =
+                readService.retrieveOne(writeService.create(requestFor("beta")).id());
+        final Page<TenantData> listed = readService.retrieveAll(null, null, null, null);
+
+        // The projection has no password column at all, so there is nothing to leak.
+        assertFalse(read.toString().contains("s3cret"));
+        assertFalse(listed.getPageItems().toString().contains("s3cret"));
+        assertFalse(listed.getPageItems().toString().contains("enc:"));
+    }
+
+    @Test
+    void theIdentifierMustBeUnique() {
+        writeService.create(requestFor("acme"));
+
+        assertThrows(
+                TenantIdentifierAlreadyExistsException.class,
+                () -> writeService.create(requestFor("acme")));
+    }
+
+    @Test
+    void createIsRecordedInTheAuditTrailWithoutTheCredential() {
+        writeService.create(requestFor("acme"));
+
+        final var audit =
+                jdbcTemplate.queryForMap(
+                        "select action, outcome, tenant_identifier, detail from"
+                                + " tenant_administration_audit where tenant_identifier = 'acme'");
+
+        assertEquals("CREATE", audit.get("action"));
+        assertEquals("SUCCESS", audit.get("outcome"));
+        assertFalse(String.valueOf(audit.get("detail")).contains("s3cret"));
+    }
+
+    // ---------------------------------------------------------------
+    // Which database a tenant may be bound to
+    // ---------------------------------------------------------------
+
+    @Test
+    void aDatabaseAlreadyUsedByAnotherTenantIsRefused() {
+        writeService.create(requestFor("acme"));
+
+        assertThrows(
+                TenantSchemaUnavailableException.class,
+                () -> writeService.create(requestFor("intruder", "mifostenant_acme")));
+        assertEquals(
+                0,
+                jdbcTemplate.queryForObject(
+                        "select count(*) from tenants where identifier = 'intruder'",
+                        Integer.class));
+    }
+
+    @Test
+    void databaseNamesAreMatchedIgnoringCase() {
+        // PostgreSQL folds an unquoted CREATE DATABASE name to lower case, so these are the
+        // same database.
+        writeService.create(requestFor("acme"));
+
+        assertThrows(
+                TenantSchemaUnavailableException.class,
+                () -> writeService.create(requestFor("intruder", "MIFOSTENANT_ACME")));
+    }
+
+    @Test
+    void theTenantStoresOwnDatabaseIsRefused() {
+        assertThrows(
+                TenantSchemaUnavailableException.class,
+                () -> writeService.create(requestFor("store", postgres.getDatabaseName())));
     }
 
     // ---------------------------------------------------------------
@@ -417,5 +616,150 @@ class TenantManagementPostgresIntegrationTest {
                         new TenantMasterUserBootstrap(racing, "master", "a-long-enough-password")
                                 .afterPropertiesSet());
         assertEquals(1, store.count());
+    }
+
+    // ---------------------------------------------------------------
+    // Cache eviction against several managers - reproduces a real-Fineract failure
+    // ---------------------------------------------------------------
+
+    @Test
+    void createEvictsTheIdentifierFromEveryCacheManagerThatHoldsTheCache() {
+        // A running Fineract registers four CacheManagers. Asking Spring for "the" one threw
+        // NoUniqueBeanDefinitionException after create had committed, which stranded a
+        // registered tenant with an empty schema. Eviction must reach every manager.
+        final ConcurrentMapCacheManager first = new ConcurrentMapCacheManager("tenantsById");
+        final ConcurrentMapCacheManager second = new ConcurrentMapCacheManager("tenantsById");
+        final ConcurrentMapCacheManager unrelated = new ConcurrentMapCacheManager("somethingElse");
+        final TenantManagementWriteService service =
+                writeServiceWithCacheManagers(first, second, unrelated);
+
+        // A view of this identifier left behind by an earlier tenant of the same name.
+        first.getCache("tenantsById").put("acme", "stale");
+        second.getCache("tenantsById").put("acme", "stale");
+
+        service.create(requestFor("acme"));
+
+        assertNull(first.getCache("tenantsById").get("acme"));
+        assertNull(second.getCache("tenantsById").get("acme"));
+    }
+
+    @Test
+    void aFailingCacheManagerDoesNotFailACommittedCreate() {
+        // The registry write has already committed when eviction runs, so a cache problem
+        // must never surface as a failed request or strand a half-created tenant.
+        final CacheManager broken = mock(CacheManager.class);
+        when(broken.getCache(anyString())).thenThrow(new IllegalStateException("cache down"));
+        final TenantManagementWriteService service = writeServiceWithCacheManagers(broken);
+
+        assertEquals("acme", service.create(requestFor("acme")).identifier());
+        assertEquals(
+                1,
+                jdbcTemplate.queryForObject(
+                        "select count(*) from tenant_administration_audit where action = 'CREATE'",
+                        Integer.class));
+    }
+
+    // ---------------------------------------------------------------
+    // Provisioning against the real engine
+    // ---------------------------------------------------------------
+
+    @Test
+    void concurrentCreationOfTheSameSchemaNeverFails() throws Exception {
+        // Two creates racing past the existence check make PostgreSQL reject one CREATE
+        // DATABASE as a duplicate; the loser must treat the now-existing schema as success.
+        // Threads do not guarantee the collision on every run, so several rounds are tried.
+        // The assertion - no caller ever fails, and exactly one database results - holds
+        // whether or not a given round actually collided.
+        final TenantProvisioningService provisioning = new TenantProvisioningService(dataSource);
+        final ExecutorService pool = Executors.newFixedThreadPool(4);
+        try {
+            for (int round = 0; round < 5; round++) {
+                final String schema = "race_schema_" + round;
+                final CountDownLatch start = new CountDownLatch(1);
+                final List<Future<Object>> attempts = new ArrayList<>();
+                for (int caller = 0; caller < 4; caller++) {
+                    attempts.add(
+                            pool.submit(
+                                    () -> {
+                                        start.await();
+                                        provisioning.createSchemaIfAbsent(
+                                                postgres.getHost(),
+                                                String.valueOf(postgres.getFirstMappedPort()),
+                                                schema,
+                                                null,
+                                                postgres.getUsername(),
+                                                postgres.getPassword());
+                                        return null;
+                                    }));
+                }
+                start.countDown();
+                for (final Future<Object> attempt : attempts) {
+                    attempt.get(60, TimeUnit.SECONDS);
+                }
+                assertEquals(
+                        1,
+                        jdbcTemplate.queryForObject(
+                                "select count(*) from pg_database where datname = ?",
+                                Integer.class,
+                                schema));
+            }
+        } finally {
+            pool.shutdownNow();
+            for (int round = 0; round < 5; round++) {
+                jdbcTemplate.execute("drop database if exists race_schema_" + round);
+            }
+        }
+    }
+
+    @Test
+    void timestampsAreStoredAndReadAsUtcWhateverTheJvmTimeZone() {
+        // Registry and audit timestamp columns carry no zone. Binding or reading them through
+        // the JVM's default time zone stores and reports different instants on nodes
+        // configured differently, so this writes under one zone and reads under another.
+        final DateTimeFormatter wallClock = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+        final TimeZone original = TimeZone.getDefault();
+        try {
+            TimeZone.setDefault(TimeZone.getTimeZone("Asia/Kolkata"));
+            final TenantData created = writeService.create(requestFor("acme"));
+
+            TimeZone.setDefault(TimeZone.getTimeZone("America/New_York"));
+            final TenantData read = readService.retrieveOne(created.id());
+
+            final OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+            assertTrue(
+                    Duration.between(read.createdDate(), now).abs().toMinutes() < 2,
+                    "createdDate " + read.createdDate() + " should be close to " + now);
+
+            final String storedTenant =
+                    jdbcTemplate.queryForObject(
+                            "select to_char(created_date, 'YYYY-MM-DD HH24:MI:SS') from tenants"
+                                    + " where identifier = 'acme'",
+                            String.class);
+            assertTrue(
+                    Duration.between(
+                                            LocalDateTime.parse(storedTenant, wallClock),
+                                            LocalDateTime.now(ZoneOffset.UTC))
+                                    .abs()
+                                    .toMinutes()
+                            < 2,
+                    "tenants.created_date " + storedTenant + " should be a UTC wall-clock value");
+
+            final String storedAudit =
+                    jdbcTemplate.queryForObject(
+                            "select to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') from"
+                                + " tenant_administration_audit where tenant_identifier = 'acme'"
+                                + " and action = 'CREATE'",
+                            String.class);
+            assertTrue(
+                    Duration.between(
+                                            LocalDateTime.parse(storedAudit, wallClock),
+                                            LocalDateTime.now(ZoneOffset.UTC))
+                                    .abs()
+                                    .toMinutes()
+                            < 2,
+                    "audit created_at " + storedAudit + " should be a UTC wall-clock value");
+        } finally {
+            TimeZone.setDefault(original);
+        }
     }
 }

@@ -13,7 +13,8 @@ security:
 tags:
 - name: Tenant Management
   description: Administration of the tenants on this installation. Requires a master
-    user with the SUPER_MASTER role; database credentials are never returned.
+    user with the SUPER_MASTER role; database credentials are write-only and are never
+    returned.
 paths:
   /v1/admin/tenants:
     get:
@@ -59,6 +60,36 @@ paths:
           description: Validation failed
         "401":
           description: Not authenticated as a master user
+    post:
+      tags:
+      - Tenant Management
+      summary: Create a Tenant
+      description: |-
+        Registers a tenant, creates its schema and migrates it.
+
+        The schema is created and proved reachable before anything is written to the registry, so a tenant that could never have worked leaves no row behind. An existing schema is reused rather than rejected, and is never emptied.
+
+        `schemaPassword` is stored encrypted and is never returned by any endpoint.
+      operationId: create
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PostTenantsRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetTenantResponse"
+        "400":
+          description: Validation failed
+        "401":
+          description: Not authenticated as a master user
+        "403":
+          description: Refused by a domain rule
   /v1/admin/tenants/template:
     get:
       tags:
@@ -74,6 +105,33 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/GetTenantsTemplateResponse"
+        "401":
+          description: Not authenticated as a master user
+  /v1/admin/tenants/test-connection:
+    post:
+      tags:
+      - Tenant Management
+      summary: Test a Tenant Database Connection
+      description: |-
+        Opens a connection with the supplied details and reports whether it succeeded, so an administrator can check credentials before committing a tenant.
+
+        Returns only whether the database answered. The driver's own error is written to the server log rather than returned, since those messages routinely echo the connection string and user back.
+      operationId: testConnection
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PostTestConnectionRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PostTestConnectionResponse"
+        "400":
+          description: Validation failed
         "401":
           description: Not authenticated as a master user
   /v1/admin/tenants/{id}:
@@ -214,6 +272,102 @@ components:
             type: string
             example: "[\"Africa/Abidjan\",\"Asia/Kolkata\"]"
       description: GetTenantsTemplateResponse
+    PostTenantsRequest:
+      required:
+      - identifier
+      - name
+      - schemaName
+      - schemaPassword
+      - schemaServer
+      - schemaServerPort
+      - schemaUsername
+      - timezoneId
+      type: object
+      properties:
+        autoUpdate:
+          type: boolean
+          description: Migrate the schema on startup; defaults to true
+          example: true
+        contactEmail:
+          type: string
+          example: ops@acme.example.org
+        description:
+          type: string
+          example: Pilot tenant
+        identifier:
+          type: string
+          description: "Unique, lower case; cannot be changed later"
+          example: acme
+        name:
+          type: string
+          example: Acme Microfinance
+        schemaConnectionParameters:
+          type: string
+          example: sslmode=require
+        schemaName:
+          type: string
+          description: "Letters, digits and underscore, starting with a letter or\
+            \ underscore, at most 63 characters, stored in lower case. Created if\
+            \ absent; must not belong to another tenant."
+          example: mifostenant_acme
+        schemaPassword:
+          type: string
+          description: "Write-only: stored encrypted and never returned by any endpoint"
+          example: a-unique-database-secret
+        schemaServer:
+          type: string
+          example: localhost
+        schemaServerPort:
+          type: string
+          description: 1-65535
+          example: "5432"
+        schemaUsername:
+          type: string
+          example: fineract
+        status:
+          type: string
+          description: "ACTIVE, INACTIVE or SUSPENDED; defaults to ACTIVE"
+          example: ACTIVE
+        timezoneId:
+          type: string
+          description: IANA time zone
+          example: Asia/Kolkata
+      description: PostTenantsRequest
+    PostTestConnectionRequest:
+      required:
+      - schemaName
+      - schemaPassword
+      - schemaServer
+      - schemaServerPort
+      - schemaUsername
+      type: object
+      properties:
+        schemaConnectionParameters:
+          type: string
+          example: sslmode=require
+        schemaName:
+          type: string
+          example: mifostenant_acme
+        schemaPassword:
+          type: string
+          description: Used for this probe only; never stored
+        schemaServer:
+          type: string
+          example: localhost
+        schemaServerPort:
+          type: string
+          example: "5432"
+        schemaUsername:
+          type: string
+          example: fineract
+      description: PostTenantsTestConnectionRequest
+    PostTestConnectionResponse:
+      type: object
+      properties:
+        reachable:
+          type: boolean
+          example: true
+      description: PostTenantsTestConnectionResponse
   securitySchemes:
     masterBasicAuth:
       type: http

@@ -16,13 +16,18 @@ import static org.mockito.Mockito.when;
 
 import java.util.Arrays;
 import java.util.List;
+import org.apache.fineract.infrastructure.core.exception.PlatformApiDataValidationException;
 import org.apache.fineract.infrastructure.core.exception.UnrecognizedQueryParamException;
 import org.apache.fineract.infrastructure.core.serialization.DefaultToApiJsonSerializer;
+import org.apache.fineract.infrastructure.core.serialization.FromJsonHelper;
 import org.apache.fineract.infrastructure.core.service.Page;
 import org.apache.fineract.infrastructure.security.exception.NoAuthorizationException;
 import org.apache.fineract.tenant.data.TenantData;
+import org.apache.fineract.tenant.data.TenantManagementDataValidator;
 import org.apache.fineract.tenant.domain.TenantStatus;
 import org.apache.fineract.tenant.service.TenantManagementReadService;
+import org.apache.fineract.tenant.service.TenantManagementWriteService;
+import org.apache.fineract.tenant.service.TenantProvisioningService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -46,20 +51,48 @@ class TenantManagementApiResourceTest {
                     null,
                     null);
 
+    private static final String CREATE_JSON =
+            """
+            {
+              "identifier": "acme", "name": "Acme", "timezoneId": "Asia/Kolkata",
+              "schemaName": "acme", "schemaServer": "db", "schemaServerPort": "5432",
+              "schemaUsername": "u", "schemaPassword": "p"
+            }
+            """;
+
+    private static final String CONNECTION_JSON =
+            """
+            {
+              "schemaName": "acme", "schemaServer": "db", "schemaServerPort": "5432",
+              "schemaUsername": "u", "schemaPassword": "p"
+            }
+            """;
+
     private TenantManagementReadService readService;
+    private TenantManagementWriteService writeService;
+    private TenantProvisioningService provisioningService;
     private TenantManagementApiResource resource;
 
     @BeforeEach
     @SuppressWarnings("unchecked")
     void setUp() {
         readService = mock(TenantManagementReadService.class);
+        writeService = mock(TenantManagementWriteService.class);
+        provisioningService = mock(TenantProvisioningService.class);
         when(readService.retrieveAll(any(), any(), any(), any()))
                 .thenReturn(new Page<>(List.of(A_TENANT), 1));
         when(readService.retrieveOne(anyLong())).thenReturn(A_TENANT);
+        when(writeService.create(any())).thenReturn(A_TENANT);
 
         resource =
                 new TenantManagementApiResource(
-                        readService, mock(DefaultToApiJsonSerializer.class));
+                        readService,
+                        writeService,
+                        provisioningService,
+                        // A real validator, so the resource's own parsing is exercised rather
+                        // than stubbed away.
+                        new TenantManagementDataValidator(new FromJsonHelper()),
+                        mock(DefaultToApiJsonSerializer.class));
     }
 
     @AfterEach
@@ -89,10 +122,14 @@ class TenantManagementApiResourceTest {
         resource.retrieveAll(null, null, null, null);
         resource.retrieveTemplate();
         resource.retrieveOne(1L);
+        resource.create(CREATE_JSON);
+        resource.testConnection(CONNECTION_JSON);
 
         verify(readService).retrieveAll(null, null, null, null);
         verify(readService).retrieveTemplate();
         verify(readService).retrieveOne(1L);
+        verify(writeService).create(any());
+        verify(provisioningService).isReachable(any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -100,9 +137,11 @@ class TenantManagementApiResourceTest {
         assertThrows(
                 NoAuthorizationException.class, () -> resource.retrieveAll(null, null, null, null));
         assertThrows(NoAuthorizationException.class, () -> resource.retrieveOne(1L));
+        assertThrows(NoAuthorizationException.class, () -> resource.create(CREATE_JSON));
 
         verify(readService, never()).retrieveAll(any(), any(), any(), any());
         verify(readService, never()).retrieveOne(anyLong());
+        verify(writeService, never()).create(any());
     }
 
     @Test
@@ -115,9 +154,14 @@ class TenantManagementApiResourceTest {
         assertThrows(NoAuthorizationException.class, () -> resource.retrieveOne(1L));
         assertThrows(
                 NoAuthorizationException.class, () -> resource.retrieveAll(null, null, null, null));
+        assertThrows(NoAuthorizationException.class, () -> resource.create(CREATE_JSON));
+        assertThrows(
+                NoAuthorizationException.class, () -> resource.testConnection(CONNECTION_JSON));
 
         verify(readService, never()).retrieveTemplate();
         verify(readService, never()).retrieveOne(anyLong());
+        verify(writeService, never()).create(any());
+        verify(provisioningService, never()).isReachable(any(), any(), any(), any(), any(), any());
     }
 
     // ---------------------------------------------------------------
@@ -140,5 +184,20 @@ class TenantManagementApiResourceTest {
         resource.retrieveAll(null, "  ", null, null);
 
         verify(readService).retrieveAll(null, null, null, null);
+    }
+
+    // ---------------------------------------------------------------
+    // Create
+    // ---------------------------------------------------------------
+
+    @Test
+    void create_validatesBeforeAnythingIsWritten() {
+        authenticateAs("master", "SUPER_MASTER");
+
+        assertThrows(
+                PlatformApiDataValidationException.class,
+                () -> resource.create("{\"identifier\": \"acme\"}"));
+
+        verify(writeService, never()).create(any());
     }
 }

@@ -9,6 +9,8 @@ package org.apache.fineract.tenant.config;
 import javax.sql.DataSource;
 import liquibase.integration.spring.SpringLiquibase;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.fineract.infrastructure.core.service.migration.ExtendedSpringLiquibaseFactory;
+import org.apache.fineract.tenant.service.CoreTenantLiquibaseFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -23,6 +25,19 @@ import org.springframework.context.annotation.DependsOn;
 @Configuration
 @Slf4j
 public class TenantManagementConfig {
+
+    /**
+     * Adapts core's Liquibase factory to the one method this plugin uses.
+     *
+     * <p>Declared here, in the one class that already wires the plugin into the running platform,
+     * so {@code TenantSchemaMigrationService} never names the core type. See {@link
+     * CoreTenantLiquibaseFactory} for why that separation matters.
+     */
+    @Bean
+    public CoreTenantLiquibaseFactory coreTenantLiquibaseFactory(
+            final ExtendedSpringLiquibaseFactory liquibaseFactory) {
+        return liquibaseFactory::create;
+    }
 
     /**
      * Applies this plugin's migrations to the tenant store database.

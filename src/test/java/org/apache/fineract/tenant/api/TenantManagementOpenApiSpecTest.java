@@ -54,7 +54,10 @@ class TenantManagementOpenApiSpecTest {
 
         for (final String path :
                 new String[] {
-                    "/v1/admin/tenants:", "/v1/admin/tenants/template:", "/v1/admin/tenants/{id}:"
+                    "/v1/admin/tenants:",
+                    "/v1/admin/tenants/template:",
+                    "/v1/admin/tenants/{id}:",
+                    "/v1/admin/tenants/test-connection:"
                 }) {
             assertTrue(spec.contains(path), "missing path " + path);
         }
