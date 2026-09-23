@@ -115,7 +115,9 @@ paths:
       description: |-
         Opens a connection with the supplied details and reports whether it succeeded, so an administrator can check credentials before committing a tenant.
 
-        Returns only whether the database answered. The driver's own error is written to the server log rather than returned, since those messages routinely echo the connection string and user back.
+        `reachable` reports whether the target database itself answered, which is what this endpoint has always returned. The fields beside it separate the states that answer alone cannot: whether the server was reached, whether it accepted the credentials, and whether it already holds a database of that name. Before a tenant is created the target database usually does not exist yet, so `reachable` is false while the details are perfectly good - `credentialsAccepted` is the field to read then.
+
+        The driver's own error is written to the server log rather than returned, since those messages routinely echo the connection string and user back.
       operationId: testConnection
       requestBody:
         content:
@@ -475,8 +477,24 @@ components:
     PostTestConnectionResponse:
       type: object
       properties:
+        credentialsAccepted:
+          type: boolean
+          description: The server accepted the username and password. The field to
+            read when checking details before creating a tenant.
+          example: true
         reachable:
           type: boolean
+          description: "The target database itself answered. False before the database\
+            \ exists, however good the credentials are."
+          example: true
+        schemaPresent:
+          type: boolean
+          description: "The server already holds a database of that name, which creation\
+            \ will reuse rather than empty"
+          example: false
+        serverReachable:
+          type: boolean
+          description: The database server answered at all
           example: true
       description: PostTenantsTestConnectionResponse
     PutTenantsRequest:

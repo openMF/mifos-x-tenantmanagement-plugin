@@ -28,6 +28,7 @@ import lombok.RequiredArgsConstructor;
 import org.apache.fineract.infrastructure.core.exception.UnrecognizedQueryParamException;
 import org.apache.fineract.infrastructure.core.serialization.DefaultToApiJsonSerializer;
 import org.apache.fineract.infrastructure.core.service.Page;
+import org.apache.fineract.tenant.data.TenantConnectionProbe;
 import org.apache.fineract.tenant.data.TenantConnectionTestRequest;
 import org.apache.fineract.tenant.data.TenantCreateRequest;
 import org.apache.fineract.tenant.data.TenantData;
@@ -353,9 +354,17 @@ public class TenantManagementApiResource {
                     "Opens a connection with the supplied details and reports whether it succeeded,"
                         + " so an administrator can check credentials before committing a"
                         + " tenant.\n\n"
-                        + "Returns only whether the database answered. The driver's own error is"
-                        + " written to the server log rather than returned, since those messages"
-                        + " routinely echo the connection string and user back.")
+                        + "`reachable` reports whether the target database itself answered, which"
+                        + " is what this endpoint has always returned. The fields beside it"
+                        + " separate the states that answer alone cannot: whether the server was"
+                        + " reached, whether it accepted the credentials, and whether it already"
+                        + " holds a database of that name. Before a tenant is created the target"
+                        + " database usually does not exist yet, so `reachable` is false while the"
+                        + " details are perfectly good - `credentialsAccepted` is the field to read"
+                        + " then.\n\n"
+                        + "The driver's own error is written to the server log rather than"
+                        + " returned, since those messages routinely echo the connection string and"
+                        + " user back.")
     @ApiResponse(
             responseCode = "200",
             description = "OK",
@@ -383,8 +392,8 @@ public class TenantManagementApiResource {
         final TenantConnectionTestRequest request =
                 validator.validateForConnectionTest(apiRequestBodyAsJson);
 
-        final boolean reachable =
-                provisioningService.isReachable(
+        final TenantConnectionProbe probe =
+                provisioningService.probe(
                         request.schemaServer(),
                         request.schemaServerPort(),
                         request.schemaName(),
@@ -392,6 +401,6 @@ public class TenantManagementApiResource {
                         request.schemaUsername(),
                         request.schemaPassword());
 
-        return toApiJsonSerializer.serialize(Map.of("reachable", reachable));
+        return toApiJsonSerializer.serialize(probe);
     }
 }

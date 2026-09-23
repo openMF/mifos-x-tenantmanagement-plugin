@@ -107,13 +107,16 @@ JSON='Content-Type: application/json'
 # What this installation already has
 curl -u "$AUTH" "$BASE"
 
-# Is that database reachable with these credentials? Answers {"reachable": true|false}
+# Check the details before committing. Before the database exists `reachable` is false while
+# `credentialsAccepted` is true - that is the healthy answer, and the field to read here.
 curl -u "$AUTH" -H "$JSON" -X POST "$BASE/test-connection" -d '{
   "schemaName": "mifostenant_acme", "schemaServer": "localhost",
   "schemaServerPort": "5432", "schemaUsername": "postgres",
   "schemaPassword": "'"$TENANT_DB_PASSWORD"'" }'
 
 # Register and provision it. The response carries the new tenant's id.
+# The database user needs the right to create databases (CREATEDB on PostgreSQL), unless the
+# database already exists - see TENANT_MANAGEMENT.md, Database privileges.
 curl -u "$AUTH" -H "$JSON" -X POST "$BASE" -d '{
   "identifier": "acme", "name": "Acme Microfinance", "timezoneId": "Asia/Kolkata",
   "schemaName": "mifostenant_acme", "schemaServer": "localhost",

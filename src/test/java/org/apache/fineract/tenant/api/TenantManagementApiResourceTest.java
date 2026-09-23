@@ -138,7 +138,7 @@ class TenantManagementApiResourceTest {
         verify(writeService).update(eq(1L), any());
         verify(writeService).changeStatus(1L, TenantStatus.SUSPENDED);
         verify(writeService).delete(1L);
-        verify(provisioningService).isReachable(any(), any(), any(), any(), any(), any());
+        verify(provisioningService).probe(any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -176,7 +176,7 @@ class TenantManagementApiResourceTest {
         verify(writeService, never()).delete(anyLong());
         verify(writeService, never()).changeStatus(anyLong(), any());
         verify(writeService, never()).create(any());
-        verify(provisioningService, never()).isReachable(any(), any(), any(), any(), any(), any());
+        verify(provisioningService, never()).probe(any(), any(), any(), any(), any(), any());
     }
 
     // ---------------------------------------------------------------

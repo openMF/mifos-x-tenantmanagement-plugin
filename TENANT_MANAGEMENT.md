@@ -13,6 +13,7 @@ it.
 - [Why a plugin](#why-a-plugin)
 - [Security model](#security-model)
 - [Configuration](#configuration)
+- [Database privileges](#database-privileges)
 - [Database changes](#database-changes)
 - [API reference](#api-reference)
 - [What creating a tenant actually does](#what-creating-a-tenant-actually-does)
@@ -90,6 +91,37 @@ endpoint.
 | `fineract.tenant-management.status-stale-grace-seconds` | `300` | How long past its cache expiry an `ACTIVE` status is still trusted while the tenant store cannot be read. After that the tenant is refused until the store answers. |
 | `fineract.tenant-management.plugin-changelogs` | self-service, then savings (see below) | Comma-separated plugin changelogs applied to a new tenant after core's, in order. Must use the exact `classpath:/...` strings each plugin's startup migration uses. Entries not on the classpath are skipped. Add a plugin here when you install one that owns tables. |
 
+### Database privileges
+
+The credentials a tenant is registered with are an **existing** database user's. This plugin creates
+a database; it never creates a database user. That user needs:
+
+| | To create the database | To run the tenant afterwards |
+|---|---|---|
+| PostgreSQL | `CREATEDB` on the role | `CONNECT` on the database, and ownership or rights on its objects |
+| MySQL / MariaDB | `CREATE` at server scope | the usual rights on that schema |
+
+Fineract's own `docker-compose` role has no attributes at all, so on a stock local installation
+creation fails until the role is granted the right:
+
+```sql
+ALTER ROLE postgres CREATEDB;                      -- PostgreSQL
+GRANT CREATE ON *.* TO 'fineract'@'%';             -- MySQL / MariaDB
+```
+
+The alternative, and the better one for production, is to give each tenant its own user and create
+its database in advance:
+
+```sql
+CREATE ROLE acme_user LOGIN PASSWORD '…';          -- no CREATEDB needed
+CREATE DATABASE fineract_acme OWNER acme_user;
+```
+
+Creation then finds the database present and skips the create step entirely, so no user ever needs
+the right to create databases. It also means [test-connection](#testing-a-connection) can answer
+definitively before the tenant is registered, and each tenant's credential can be revoked on its
+own.
+
 ## Database changes
 
 Applied to the **tenant store** database by `TenantManagementConfig`, after core's own upgrade.
@@ -132,6 +164,38 @@ MANAGEMENT PLUGIN**. The requests read `{{master_username}}`, `{{master_password
 The namespace is `/v1/admin/tenants` rather than `/v1/tenants` because core Fineract already serves
 `/v1/tenants/{tenantId}/oidc-config`; a master chain claiming `/v1/tenants/**` would capture that
 core endpoint.
+
+### Testing a connection
+
+`POST /v1/admin/tenants/test-connection` reports four things:
+
+| Field | Meaning |
+|---|---|
+| `reachable` | the target database itself answered |
+| `serverReachable` | the database server answered at all |
+| `credentialsAccepted` | the server accepted the username and password |
+| `schemaPresent` | the server already holds a database of that name |
+
+`reachable` alone cannot be acted on before a tenant exists, which is when an administrator most
+wants to check their details: it connects to the target database, and that database has usually not
+been created yet, so the answer is `false` however good the credentials are. **`credentialsAccepted`
+is the field to read then** — it is answered by connecting to the server's maintenance database, the
+same connection `CREATE DATABASE` is issued over.
+
+So the normal state while filling in a create form is `credentialsAccepted: true` with
+`schemaPresent: false` and `reachable: false`, and that is a healthy answer rather than a failure.
+`credentialsAccepted: false` is the one to act on.
+
+The driver's own message is never returned — those routinely echo the connection string and user
+back — but the classification is, and a failed create names its cause through a distinct
+`userMessageGlobalisationCode`:
+
+| Code | Cause |
+|---|---|
+| `error.msg.tenant.connection.credentials.rejected` | the server refused the username or password |
+| `error.msg.tenant.schema.creation.not.permitted` | the user may not create databases |
+| `error.msg.tenant.schema.absent` | the server has no database of that name |
+| `error.msg.tenant.connection.failed` | nothing answered, or the driver said nothing finer |
 
 ### OpenAPI
 
@@ -218,7 +282,10 @@ a retried request does not look like a failure.
    itself or a system database (`postgres`, `template0`, …), not already used by another registered
    tenant (same server, port and name — servers compared as written), and not retained from a
    removed tenant under a different identifier.
-2. Creates the schema if absent — an existing schema is **reused, never emptied**.
+2. Creates the schema if absent — an existing schema is **reused, never emptied**. This step needs
+   a database user allowed to create databases (`CREATEDB` on PostgreSQL, the `CREATE` privilege on
+   MySQL and MariaDB). Give the user that right, or create the database yourself beforehand and the
+   step is skipped — see [Database privileges](#database-privileges).
 3. Opens a connection to prove the credentials work.
 4. Writes the connection and tenant rows in one transaction, with the password encrypted and the
    master password hash stamped. (Without that hash core's `TenantDataSourceFactory` refuses to open

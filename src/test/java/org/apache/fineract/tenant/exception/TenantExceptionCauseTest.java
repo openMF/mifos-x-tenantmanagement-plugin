@@ -21,7 +21,7 @@ class TenantExceptionCauseTest {
         final SQLException driverError = new SQLException("password authentication failed");
 
         final TenantConnectionFailedException e =
-                new TenantConnectionFailedException("db", "5432", "acme", driverError);
+                TenantConnectionFailedException.from("db", "5432", "acme", driverError);
 
         assertSame(driverError, e.getCause());
     }
@@ -40,12 +40,13 @@ class TenantExceptionCauseTest {
     void theDriverErrorStaysOutOfTheUserFacingMessage() {
         // Driver messages echo users and connection details; they belong in the log only.
         final TenantConnectionFailedException e =
-                new TenantConnectionFailedException(
+                TenantConnectionFailedException.from(
                         "db",
                         "5432",
                         "acme",
                         new SQLException(
-                                "FATAL: password authentication failed for user \"postgres\""));
+                                "FATAL: password authentication failed for user \"postgres\"",
+                                "28P01"));
 
         assertFalse(e.getMessage().contains("password authentication"));
     }
