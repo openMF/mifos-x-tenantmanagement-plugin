@@ -18,6 +18,8 @@ import java.util.Properties;
 import java.util.function.Predicate;
 import javax.sql.DataSource;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.fineract.tenant.data.TenantConnectionProbe;
+import org.apache.fineract.tenant.domain.ConnectionFailureKind;
 import org.apache.fineract.tenant.domain.TenantSchemaName;
 import org.apache.fineract.tenant.exception.TenantConnectionFailedException;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -119,15 +121,14 @@ public class TenantProvisioningService {
             }
         } catch (final SQLException e) {
             // The driver's own message routinely echoes the JDBC URL and user back, so it is
-            // logged rather than returned. SOUL_GUARDRAILS: no infrastructure detail in
-            // responses.
+            // logged rather than returned; only the classification leaves the server.
             log.warn(
                     "Tenant database at {}:{}/{} could not be reached",
                     schemaServer,
                     schemaServerPort,
                     schemaName,
                     e);
-            throw new TenantConnectionFailedException(
+            throw TenantConnectionFailedException.from(
                     schemaServer, schemaServerPort, schemaName, e);
         }
     }
@@ -144,6 +145,39 @@ public class TenantProvisioningService {
             final String connectionParameters,
             final String schemaUsername,
             final String plainPassword) {
+        return probe(
+                        schemaServer,
+                        schemaServerPort,
+                        schemaName,
+                        connectionParameters,
+                        schemaUsername,
+                        plainPassword)
+                .reachable();
+    }
+
+    /**
+     * Probes a database and reports what was found, without throwing.
+     *
+     * <p>The target database is tried first, which is the check this plugin has always made. When
+     * it answers there is nothing left to ask. When it does not, the server itself is asked - the
+     * same maintenance-database connection {@link #createSchemaIfAbsent} already opens to issue
+     * {@code CREATE DATABASE} - so the answer can separate a refused password from a database that
+     * has simply not been created yet.
+     *
+     * <p>That second question is what makes the endpoint usable before a tenant exists. Until it
+     * was asked, an administrator checking details for a tenant they were about to create always
+     * got {@code false}, because the database they were about to create did not exist yet.
+     *
+     * @param plainPassword the password as typed by the administrator, not the encrypted form
+     */
+    public TenantConnectionProbe probe(
+            final String schemaServer,
+            final String schemaServerPort,
+            final String schemaName,
+            final String connectionParameters,
+            final String schemaUsername,
+            final String plainPassword) {
+
         try {
             verifyReachable(
                     schemaServer,
@@ -152,10 +186,81 @@ public class TenantProvisioningService {
                     connectionParameters,
                     schemaUsername,
                     plainPassword);
-            return true;
-        } catch (final TenantConnectionFailedException e) {
-            return false;
+            return TenantConnectionProbe.usable();
+        } catch (final TenantConnectionFailedException targetFailure) {
+            return askTheServer(
+                    schemaServer,
+                    schemaServerPort,
+                    schemaName,
+                    connectionParameters,
+                    schemaUsername,
+                    plainPassword);
         }
+    }
+
+    /**
+     * Asks the server what it thinks of these credentials, and whether it holds the database.
+     *
+     * <p>Reached only when the target database did not answer. A server that accepts the
+     * credentials but does not hold the database is the ordinary state before a tenant is created;
+     * a server that accepts them and does hold it means the target refused for a reason of its own,
+     * most often a privilege on that one database.
+     */
+    private TenantConnectionProbe askTheServer(
+            final String schemaServer,
+            final String schemaServerPort,
+            final String schemaName,
+            final String connectionParameters,
+            final String schemaUsername,
+            final String plainPassword) {
+
+        final boolean postgres = isPostgres();
+        final String maintenanceUrl =
+                maintenanceUrl(schemaServer, schemaServerPort, connectionParameters, postgres);
+
+        try (Connection connection =
+                openConnection(maintenanceUrl, schemaUsername, plainPassword)) {
+            return TenantConnectionProbe.serverOnly(schemaExists(connection, schemaName, postgres));
+        } catch (final SQLException serverFailure) {
+            log.warn(
+                    "Database server at {}:{} could not be probed for {}",
+                    schemaServer,
+                    schemaServerPort,
+                    schemaName,
+                    serverFailure);
+            return switch (ConnectionFailureKind.from(serverFailure)) {
+                case CREDENTIALS_REJECTED -> TenantConnectionProbe.credentialsRejected();
+                // The server answered and knows this user; it just will not let them into the
+                // maintenance database, so whether the target exists stays unknown.
+                case INSUFFICIENT_PRIVILEGE -> TenantConnectionProbe.serverOnly(false);
+                default -> TenantConnectionProbe.unreachable();
+            };
+        }
+    }
+
+    /** True when this installation runs on PostgreSQL. */
+    private boolean isPostgres() {
+        return jdbcProtocol().toLowerCase(Locale.ROOT).contains("postgres");
+    }
+
+    /**
+     * A URL for some database on the server other than the target.
+     *
+     * <p>{@code CREATE DATABASE} needs one, and so does a probe of a database that does not exist
+     * yet. PostgreSQL always has {@code postgres}; MySQL and MariaDB accept a connection with no
+     * database selected at all.
+     */
+    private String maintenanceUrl(
+            final String schemaServer,
+            final String schemaServerPort,
+            final String connectionParameters,
+            final boolean postgres) {
+        return toJdbcUrl(
+                jdbcProtocol(),
+                schemaServer,
+                schemaServerPort,
+                postgres ? "postgres" : "",
+                connectionParameters);
     }
 
     /**
@@ -181,19 +286,9 @@ public class TenantProvisioningService {
             throw new IllegalArgumentException("Unsafe schema name rejected before DDL");
         }
 
-        final String protocol = jdbcProtocol();
-        final boolean postgres = protocol.toLowerCase(Locale.ROOT).contains("postgres");
-
-        // CREATE DATABASE needs a connection to some *other* database on the same server.
-        // PostgreSQL always has `postgres`; MySQL and MariaDB accept a connection with no
-        // database selected at all.
+        final boolean postgres = isPostgres();
         final String adminUrl =
-                toJdbcUrl(
-                        protocol,
-                        schemaServer,
-                        schemaServerPort,
-                        postgres ? "postgres" : "",
-                        connectionParameters);
+                maintenanceUrl(schemaServer, schemaServerPort, connectionParameters, postgres);
 
         try (Connection connection = openConnection(adminUrl, schemaUsername, plainPassword)) {
             if (schemaExists(connection, schemaName, postgres)) {
@@ -229,7 +324,7 @@ public class TenantProvisioningService {
                     schemaServer,
                     schemaServerPort,
                     e);
-            throw new TenantConnectionFailedException(
+            throw TenantConnectionFailedException.from(
                     schemaServer, schemaServerPort, schemaName, e);
         }
     }

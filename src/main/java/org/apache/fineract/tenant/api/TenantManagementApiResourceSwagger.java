@@ -203,8 +203,29 @@ final class TenantManagementApiResourceSwagger {
     static final class PostTestConnectionResponse {
         private PostTestConnectionResponse() {}
 
-        @Schema(example = "true")
+        @Schema(
+                description =
+                        "The target database itself answered. False before the database exists,"
+                                + " however good the credentials are.",
+                example = "true")
         public Boolean reachable;
+
+        @Schema(description = "The database server answered at all", example = "true")
+        public Boolean serverReachable;
+
+        @Schema(
+                description =
+                        "The server accepted the username and password. The field to read when"
+                                + " checking details before creating a tenant.",
+                example = "true")
+        public Boolean credentialsAccepted;
+
+        @Schema(
+                description =
+                        "The server already holds a database of that name, which creation will"
+                                + " reuse rather than empty",
+                example = "false")
+        public Boolean schemaPresent;
     }
 
     static final class PutTenantsRequest {
